@@ -11,7 +11,7 @@ The source README states: “As far as I'm concerned, you can do whatever you wa
 
 The ported formulas and structures are identified in `docs/PORTING.md`. Existing Javier Arévalo copyright headers are retained where source was directly adapted.
 
-`assets/generated/speed_haste_assets.bin` is a platform conversion of the MAP00 subset of the supplied shareware `SPEEDH.JCL`: palette, floor tiles, panorama, sector walls, sprites, cockpit/HUD and I3D vehicle geometry. It contains no DOS executable, setup program, DOS4GW runtime, documentation, original S3M music or raw sound effects. Speed Haste names, graphics and converted game data remain property of their respective owners; this project does not relicense them.
+`assets/generated/speed_haste_assets.bin` is a platform conversion of both shareware circuits (MAP00/MAP01), both vehicle classes, palettes, floor tiles, panoramas, sector walls, sprites, cockpits/HUDs and I3D vehicle geometry from the supplied `SPEEDH.JCL`. It contains no DOS executable, setup program, DOS4GW runtime, documentation, original S3M music or raw sound effects. Speed Haste names, graphics and converted game data remain property of their respective owners; this project does not relicense them.
 
 The conversion can be reproduced with `tools/import_speed_haste.py` from a legally obtained `SPEEDH.JCL`.
 

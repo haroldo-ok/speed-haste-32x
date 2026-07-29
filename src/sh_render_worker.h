@@ -9,9 +9,11 @@
 
 typedef struct SHFloorJob {
     volatile uint8_t *framebuffer;
+    const uint8_t *map;
+    const uint8_t *tiles;
     uint32_t camera_x, camera_y;
     uint16_t angle;
-    uint16_t reserved;
+    uint16_t track;
     int32_t height, focus, horizon;
 } SHFloorJob;
 

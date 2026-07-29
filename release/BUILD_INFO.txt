@@ -1,39 +1,42 @@
-Speed Haste 32X — source-port performance revision
-================================================
+Speed Haste 32X — forward-flow/camera correction revision
+========================================================
 ROM: SpeedHaste32X.32x
-Size: 1,572,864 bytes (1.5 MiB)
-SHA-256: 24a87baa7f9bc96dc1b7218be0e16d5cafccaefa8c8a44042c40b7cbe0477198
-Genesis checksum: 0x85DC
+Size: 2,621,440 bytes (2.5 MiB)
+SHA-256: 913a419cd1f6e64a6d760172dc200a483ed57099efe4cc52b4230771458f36d0
+Genesis checksum: 0xB9A8
 MARS master entry: 0x06000240
 MARS slave entry: 0x06000244
 
 Toolchain: 32XDK 20220418 / GCC 12.1.0
 Emulator: PicoDrive libretro 78a662e3135871a6c657d5e61900f6704152e594
 
-Content imported from original shareware SPEEDH.JCL
-- MAP00 "Racer's Edge"
-- 115 rotated floor tiles
-- 88 PATH points
-- 86 textured walls
-- 263 trackside objects
-- 106 IS2 assets
-- 6 original I3D cars, converted to 16 directional views each
-- Original title, panorama, mountains, cockpit, HUD and countdown
+Direction/camera corrections
+- Heading reconstruction now matches every original GetAngle(dx, -dy) call
+- Player movement angle no longer mirrors after steering
+- AI target headings and PATH/lap checks use the same inverted-Y convention
+- A fixed scene point now approaches/down-projects during forward movement
+- Chase/high camera retains original delta/16 angular lag
+- Chase camera position remains target - radius*forward (behind the car)
+- Directional cars retain flsprs.c's 0x8000 rear-view model rotation
 
-Performance
-- Dual SH-2 floor/panorama rendering
-- Timer-independent 70 Hz simulation
-- 116 completed frames / 600 VBlanks
-- Measured output: 11.6 fps in pinned PicoDrive
-- Initial source-based revision: approximately 3–4 fps with slow-motion timing
+Perspective corrections retained
+- Floor, walls, objects and cars share RenderView's hsk+y projection origin
+- IS2 objects use authored dx/dy hotspots
+
+Original content
+- MAP00 Racer's Edge and MAP01 The City
+- Formula One and Stock; 12 original I3D cars
+- Both panoramas, cockpits, tachometers and setup menus
 
 Verification: PASS
-- Original-data conversion tests
-- Static ROM/MARS/checksum tests
-- Title/menu/countdown/race/control/pause/finish E2E test
-- Black/frozen framebuffer checks
-- Minimum 10 fps performance gate
-- Acceleration changed 159,025 RGB bytes
-- Steering changed 148,490 RGB bytes
+- 16-heading inverted-Y reconstruction test
+- Forward scene-flow depth/screen projection test
+- Floor/object identity at eight depths
+- IS2 hotspot, model orientation and camera smoothing tests
+- Static ROM/MARS/checksum and two-map content tests
+- PicoDrive The City + Stock E2E and black-screen tests
+- The City/Stock: 100 frames / 600 VBlanks = 10.0 fps
+- Acceleration changed 99,053 RGB bytes
+- Steering changed 152,182 RGB bytes
 
 Detailed report: ../test-results/emulator/report.json

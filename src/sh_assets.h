@@ -31,17 +31,31 @@ typedef struct SHModel {
     uint16_t vertex_count, face_count;
 } SHModel;
 
+typedef struct SHTrackAssets {
+    const uint8_t *map;
+    const uint8_t *tiles;
+    const uint8_t *sky;
+    const uint8_t *mountains;
+    const uint8_t *path;
+    const uint8_t *starts;
+    const uint8_t *walls;
+    const uint8_t *obstacles;
+    uint16_t tile_count, path_count, start_count;
+    uint16_t wall_count, obstacle_count;
+} SHTrackAssets;
+
 uint16_t sha_rd16(const uint8_t *p);
 int16_t sha_rds16(const uint8_t *p);
 uint32_t sha_rd32(const uint8_t *p);
 int32_t sha_rds32(const uint8_t *p);
 int32_t sha_cos30(uint16_t angle);
 int32_t sha_sin30(uint16_t angle);
+void sha_get_track(uint8_t track, SHTrackAssets *out);
 void sha_get_sprite(uint16_t id, SHSprite *out);
-void sha_get_path(uint16_t id, SHPathPoint *out);
-void sha_get_wall(uint16_t id, SHWall *out);
-void sha_get_obstacle(uint16_t id, SHObstacle *out);
-void sha_get_model(uint16_t id, SHModel *out);
+void sha_get_path(uint8_t track, uint16_t id, SHPathPoint *out);
+void sha_get_wall(uint8_t track, uint16_t id, SHWall *out);
+void sha_get_obstacle(uint8_t track, uint16_t id, SHObstacle *out);
+void sha_get_model(uint8_t car_type, uint16_t id, SHModel *out);
 
 static inline const uint8_t *sha_ptr(uint32_t offset) { return SH_ASSET_BASE + offset; }
 
