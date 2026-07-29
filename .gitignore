@@ -1,0 +1,8 @@
+build/
+*.o
+*.bin
+__pycache__/
+*.pyc
+release/*.elf
+release/*.map
+test-results/emulator/*.ppm

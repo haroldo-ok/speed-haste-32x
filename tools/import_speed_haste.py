@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""Convert the original SPEEDH.JCL data into the compact 32X runtime format.
+
+The converter follows the structures and coordinate transforms in jclib.c,
+racemap.c, sectors.c, is2code.c and object3d.c. It imports only shareware
+circuit 0 and the assets required by the 32X edition.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import argparse
+import math
+import shlex
+import struct
+
+JCL_MAGIC = 0xDF73B489
+IS2_MAGIC = 0x3253492E
+I3D_MAGIC = 0x00443342
+
+
+def u16(v: int) -> bytes:
+    return struct.pack("<H", v & 0xFFFF)
+
+
+def s16(v: int) -> bytes:
+    return struct.pack("<h", v)
+
+
+def u32(v: int) -> bytes:
+    return struct.pack("<I", v & 0xFFFFFFFF)
+
+
+def s32(v: int) -> bytes:
+    return struct.pack("<i", v)
+
+
+class Blob:
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.offsets: dict[str, int] = {}
+
+    def align(self, amount: int = 4) -> None:
+        while len(self.data) % amount:
+            self.data.append(0)
+
+    def add(self, name: str, payload: bytes | bytearray, align: int = 4) -> int:
+        self.align(align)
+        self.offsets[name] = len(self.data)
+        self.data.extend(payload)
+        return self.offsets[name]
+
+
+@dataclass
+class IS2:
+    width: int
+    height: int
+    dx: int
+    dy: int
+    xratio: int
+    yratio: int
+    pixels: bytes
+
+
+class JCL:
+    def __init__(self, filename: Path) -> None:
+        data = filename.read_bytes()
+        magic, count, _real_count, directory_size = struct.unpack_from("<IIII", data, len(data) - 16)
+        if magic != JCL_MAGIC:
+            raise ValueError(f"{filename} is not a Speed Haste JCL")
+        directory = len(data) - directory_size
+        self.files: dict[str, bytes] = {}
+        for index in range(count):
+            raw_name, backwards_offset, size = struct.unpack_from("<24sii", data, directory + index * 32)
+            name = raw_name.split(b"\0", 1)[0].decode("ascii").upper()
+            start = directory - backwards_offset
+            self.files[name] = data[start:start + size]
+
+    def get(self, name: str) -> bytes:
+        return self.files[name.upper()]
+
+    def maybe(self, name: str) -> bytes | None:
+        return self.files.get(name.upper())
+
+
+def decode_is2(data: bytes) -> IS2:
+    magic, width, height, dx, dy, xr, yr, flags, length = struct.unpack_from("<IHHhhHHIi", data)
+    if magic != IS2_MAGIC:
+        raise ValueError("invalid IS2 magic")
+    raw = data[24:24 + length]
+    lines = height if flags & 1 else width
+    offsets: list[int] = []
+    cursor = 0
+    for _ in range(lines):
+        offsets.append(cursor)
+        if cursor >= len(raw):
+            continue
+        cursor += 1
+        while cursor < len(raw) and raw[cursor] != 0:
+            cursor += raw[cursor] + 1
+        cursor += 1
+
+    pixels = bytearray(width * height)  # Zero is transparent to the 32X blitter.
+    for line, cursor in enumerate(offsets):
+        if cursor >= len(raw):
+            continue
+        x = raw[cursor]
+        cursor += 1
+        while cursor < len(raw):
+            count = raw[cursor]
+            cursor += 1
+            for _ in range(count):
+                if cursor >= len(raw):
+                    break
+                color = raw[cursor]
+                cursor += 1
+                px, py = (x, line) if flags & 1 else (line, x)
+                if 0 <= px < width and 0 <= py < height:
+                    pixels[py * width + px] = color
+                x += 1
+            if cursor >= len(raw) or raw[cursor] == 0:
+                cursor += 1
+                break
+            x += raw[cursor]
+            cursor += 1
+    return IS2(width, height, dx, dy, xr, yr, bytes(pixels))
+
+
+def rotate_tile(source: bytes, rotation: int) -> bytes:
+    if rotation == 0:
+        return source
+    out = bytearray(4096)
+    for y in range(64):
+        for x in range(64):
+            if rotation == 1:
+                sx, sy = y, 63 - x
+            elif rotation == 2:
+                sx, sy = 63 - x, 63 - y
+            else:
+                sx, sy = 63 - y, x
+            out[y * 64 + x] = source[sy * 64 + sx]
+    return bytes(out)
+
+
+def parse_map(jcl: JCL, number: int = 0):
+    data = jcl.get(f"MAP{number:02}.DAT")
+    tile_numbers = struct.unpack_from("<4096H", data, 4)
+    rotations = data[4 + 8192:4 + 8192 + 4096]
+    combinations: dict[tuple[int, int], int] = {}
+    atlas = bytearray()
+    map64 = bytearray(4096)
+    grafs = jcl.get("GRAFS.DAT")
+    for index, tile_number in enumerate(tile_numbers):
+        key = (tile_number, rotations[index] & 3)
+        if key not in combinations:
+            combinations[key] = len(combinations)
+            source = grafs[tile_number * 4096:(tile_number + 1) * 4096]
+            atlas.extend(rotate_tile(source, key[1]))
+        map64[index] = combinations[key]
+
+    # Original racemap.c installs the 64x64 disk map in the middle of 128x128.
+    map128 = bytearray(128 * 128)
+    for gy in range(32, 96):
+        for gx in range(32, 96):
+            # tDiskMap is declared Map[64][64], with the X index first.
+            map128[gy * 128 + gx] = map64[(gx - 32) * 64 + (gy - 32)]
+
+    things = []
+    for offset in range(12292, len(data) - 7, 8):
+        x, y, angle, kind = struct.unpack_from("<HHHH", data, offset)
+        things.append((x, y, angle, kind))
+    return bytes(map128), bytes(atlas), combinations, things
+
+
+def parse_path(jcl: JCL, number: int = 0) -> bytes:
+    data = jcl.get(f"MAP{number:02}.PTH")
+    version, points, point_size = struct.unpack_from("<iii", data, 192)
+    if version != 0 or point_size < 16:
+        raise ValueError("unsupported PATH version")
+    out = bytearray()
+    for index in range(points):
+        x, y, direction, speed = struct.unpack_from("<IIii", data, 256 + index * point_size)
+        out += u32(x) + u32(y) + s32(direction) + s32(speed)
+    return bytes(out)
+
+
+def parse_sectors(jcl: JCL, sprite_id: dict[str, int]):
+    lines = [line.strip() for line in jcl.get("MAP00.SEC").decode("ascii").replace("\r", "").split("\n")]
+    lines = [line for line in lines if line and not line.startswith(";")]
+    vertex_count, sector_count, _side_count = (int(v, 0) for v in lines[0].split())
+    cursor = 2  # skip header + Vertices
+    vertices = []
+    for _ in range(vertex_count):
+        x, y = (int(v, 0) for v in lines[cursor].split())
+        vertices.append((x, y))
+        cursor += 1
+    if lines[cursor].lower() != "sectors":
+        raise ValueError("malformed SEC file")
+    cursor += 1
+    walls = []
+    for _ in range(sector_count):
+        side_count, _flags = (int(v, 0) for v in lines[cursor].split())
+        cursor += 1
+        for _ in range(side_count):
+            fields = shlex.split(lines[cursor])
+            cursor += 1
+            v0, v1 = int(fields[0], 0), int(fields[1], 0)
+            texture = fields[2]
+            if texture:
+                x0, y0 = vertices[v0]
+                x1, y1 = vertices[v1]
+                walls.append((x0, y0, x1, y1, sprite_id[texture.upper() + ".IS2"]))
+    payload = bytearray()
+    for x0, y0, x1, y1, texture in walls:
+        payload += u32(x0) + u32(y0) + u32(x1) + u32(y1) + u16(texture) + u16(0)
+    return bytes(payload), len(walls)
+
+
+def parse_i3d(data: bytes):
+    magic, object_size = struct.unpack_from("<II", data)
+    if magic != I3D_MAGIC:
+        raise ValueError("invalid I3D magic")
+    obj = data[8:8 + object_size]
+    nverts, _nnormals, nfaces, _nfaceverts, nmaterials, flags = struct.unpack_from("<6H", obj)
+    verts_offset, _normals_offset, faces_offset, materials_offset = struct.unpack_from("<4I", obj, 12)
+    scx, scy, scz, dcx, dcy, dcz = struct.unpack_from("<6i", obj, 36)
+    if scx == 0: scx = 1 << 19
+    if scy == 0: scy = 1 << 19
+    if scz == 0: scz = 1 << 19
+    scx >>= 1; scy >>= 1; scz >>= 1
+
+    vertices = []
+    for index in range(nverts):
+        x, y, z = struct.unpack_from("<iii", obj, verts_offset + index * 36)
+        vertices.append(((x - dcx) * scx >> 16, (y - dcy) * scy >> 16, (z - dcz) * scz >> 16))
+
+    material_colors = []
+    for index in range(nmaterials):
+        material_colors.append(obj[materials_offset + index * 28])
+
+    faces = []
+    face_offset = faces_offset
+    seen = set()
+    while face_offset and len(faces) < nfaces:
+        if face_offset in seen:
+            raise ValueError("cyclic I3D face list")
+        seen.add(face_offset)
+        count = struct.unpack_from("<H", obj, face_offset + 2)[0]
+        material_pointer = struct.unpack_from("<I", obj, face_offset + 8)[0]
+        material = (material_pointer - materials_offset) // 28 if material_pointer else -1
+        color = material_colors[material] if 0 <= material < len(material_colors) else 0
+        indices = []
+        for index in range(count):
+            vertex_pointer = struct.unpack_from("<I", obj, face_offset + 48 + index * 20)[0]
+            indices.append((vertex_pointer - verts_offset) // 36)
+        if count >= 3 and color:
+            faces.append((color, indices))
+        face_offset = struct.unpack_from("<I", obj, face_offset + 36)[0]
+    return flags, vertices, faces
+
+
+def rasterize_car_views(model) -> bytes:
+    """Pre-render the I3D model through the engine's 16-angle sprite path.
+
+    FS3_Load/FSP_AddObj explicitly support 17 directional bitmap frames. Using
+    that path on 32X avoids doing hundreds of divisions per car per frame.
+    """
+    _flags, vertices, faces = model
+    width, height = 64, 48
+    atlas = bytearray()
+
+    def fill_poly(image: bytearray, points: list[tuple[int, int]], color: int) -> None:
+        miny = max(0, min(y for x, y in points))
+        maxy = min(height - 1, max(y for x, y in points))
+        for y in range(miny, maxy + 1):
+            hits = []
+            for i, (x0, y0) in enumerate(points):
+                x1, y1 = points[(i + 1) % len(points)]
+                if (y0 <= y < y1) or (y1 <= y < y0):
+                    hits.append(x0 + (y - y0) * (x1 - x0) // (y1 - y0))
+            hits.sort()
+            for i in range(0, len(hits) - 1, 2):
+                for x in range(max(0, hits[i]), min(width - 1, hits[i + 1]) + 1):
+                    image[y * width + x] = color
+
+    for view in range(16):
+        a = view * 2.0 * math.pi / 16.0
+        ca, sa = math.cos(a), math.sin(a)
+        rotated = []
+        for x, y, z in vertices:
+            rotated.append((x * ca + z * sa, z * ca - x * sa, y))
+        min_rx = min(v[0] for v in rotated)
+        max_rx = max(v[0] for v in rotated)
+        xscale = 42.0 / max(1.0, max_rx - min_rx)
+        xcenter = (min_rx + max_rx) * 0.5
+        projected = []
+        depths = []
+        for rx, rz, y in rotated:
+            projected.append((round(32 + (rx - xcenter) * xscale),
+                              round(43 - y * 0.0055 + rz * 0.00035)))
+            depths.append(rz)
+        ordered = []
+        for color, indices in faces:
+            points = [projected[i] for i in indices]
+            area = sum(points[i][0] * points[(i + 1) % len(points)][1] -
+                       points[(i + 1) % len(points)][0] * points[i][1]
+                       for i in range(len(points)))
+            if area < 0 or len(points) == 3:
+                ordered.append((sum(depths[i] for i in indices) / len(indices), color, points))
+        ordered.sort(reverse=True)
+        image = bytearray(width * height)
+        for _depth, color, points in ordered:
+            fill_poly(image, points, color)
+        atlas.extend(image)
+    return bytes(atlas)
+
+
+def add_model(blob: Blob, name: str, model) -> tuple[int, int, int]:
+    _flags, vertices, faces = model
+    payload = bytearray()
+    for x, y, z in vertices:
+        payload += s32(x) + s32(y) + s32(z)
+    face_start = len(payload)
+    for color, indices in faces:
+        payload += bytes((len(indices), color)) + u16(0)
+        for index in indices:
+            payload += u16(index)
+        if len(payload) & 3:
+            payload += b"\0\0"
+    offset = blob.add(name, payload)
+    return offset, len(vertices), len(faces)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("jcl", type=Path)
+    parser.add_argument("--out", type=Path, default=Path("assets/generated"))
+    args = parser.parse_args()
+    args.out.mkdir(parents=True, exist_ok=True)
+    jcl = JCL(args.jcl)
+    blob = Blob()
+    blob.add("MAGIC", b"SH32DATA" + u32(2), 4)
+
+    # Trig is stored big-endian so the big-endian SH-2 can index it directly.
+    trig = b"".join(struct.pack(">h", round(math.cos(index * 2 * math.pi / 1024) * 32767)) for index in range(1024))
+    blob.add("COS_Q15", trig, 4)
+    blob.add("GAME_PALETTE", jcl.get("GRAFS.PAL"), 4)
+    blob.add("TITLE_PALETTE", jcl.get("SPHLOGO.PAL"), 4)
+    blob.add("COLOR_MAP", jcl.get("GRAFS.CLR"), 4)
+
+    map_data, tile_atlas, combinations, things = parse_map(jcl)
+    blob.add("MAP128", map_data, 4)
+    blob.add("TILES", tile_atlas, 4)
+    blob.add("SKY", jcl.get("NUBES0.PIX"), 4)
+    blob.add("MOUNTAINS", jcl.get("MOUNT0.PIX"), 4)
+    blob.add("COCKPIT", jcl.get("SALP0.PIX"), 4)
+    blob.add("TITLE", jcl.get("SPHLOGO.PIX"), 4)
+    blob.add("MENU", jcl.get("MBG_PRIN.PIX"), 4)
+    path = parse_path(jcl)
+    blob.add("PATH", path, 4)
+
+    starts = bytearray()
+    for x, y, angle, kind in things:
+        if kind >> 8 == 241:
+            starts += u16(x) + u16(y) + u16((0x4000 - angle) & 0xFFFF) + u16(0)
+    blob.add("STARTS", starts, 4)
+
+    # Decode all wall textures, HUD, countdown, and visible map sprites.
+    wall_names = set()
+    sec_text = jcl.get("MAP00.SEC").decode("ascii")
+    for line in sec_text.replace("\r", "").split("\n"):
+        try:
+            fields = shlex.split(line.strip())
+        except ValueError:
+            continue
+        if len(fields) == 4 and fields[2]:
+            wall_names.add(fields[2].upper() + ".IS2")
+
+    hud_names = [
+        "MGEAR.IS2", "MREVO0.IS2", "MLAPS.IS2", "MPOS.IS2", "MPOSBAR.IS2",
+        "MLAP.IS2", "MBEST.IS2", "PAUSE.IS2", "RFINLAP.IS2", "ENDRACE.IS2",
+        "YOUWIN.IS2", "RACE_0.IS2", "RACE_1.IS2", "RACE_2.IS2", "RACE_3.IS2",
+        "MFBGB.IS2", "MFMGB.IS2", "MWQUOTE.IS2", "MWDQUOTE.IS2",
+        "MGQUOTE.IS2", "MGDQUOTE.IS2",
+    ]
+    for prefix in ("MFBG", "MFBW", "MFMG", "MFMW", "MFLW", "MFLG", "MG"):
+        for digit in range(10):
+            hud_names.append(f"{prefix}{digit}.IS2")
+
+    obstacle_names = set()
+    obstacle_info = []
+    for x, y, angle, kind in things:
+        if kind >= 0xF000:
+            continue
+        transformed = ((kind & 0xFF00) >> 4) + (kind & 0xF)
+        name = f"XPR{transformed:03X}.IS2"
+        if jcl.maybe(name):
+            obstacle_names.add(name)
+            obstacle_info.append((x, y, (0x4000 - angle) & 0xFFFF, name))
+
+    sprite_names = sorted(wall_names) + [n for n in hud_names if jcl.maybe(n)] + sorted(obstacle_names)
+    # Stable de-duplication.
+    sprite_names = list(dict.fromkeys(sprite_names))
+    sprite_id = {name: index for index, name in enumerate(sprite_names)}
+    sprite_meta = bytearray()
+    decoded_sprites: list[IS2] = []
+    for name in sprite_names:
+        sprite = decode_is2(jcl.get(name))
+        decoded_sprites.append(sprite)
+        pixel_offset = blob.add("SPRITE_" + name.replace(".", "_"), sprite.pixels, 4)
+        # World dimensions exactly as FS3_Load computes them.
+        world_w = sprite.xratio * sprite.width * 0x2000 // (55 << 8)
+        world_h = sprite.yratio * sprite.height * 0x2000 // (66 << 8)
+        sprite_meta += u32(pixel_offset) + u16(sprite.width) + u16(sprite.height)
+        sprite_meta += s16(sprite.dx) + s16(sprite.dy) + u32(world_w) + u32(world_h)
+    blob.add("SPRITE_META", sprite_meta, 4)
+
+    walls, wall_count = parse_sectors(jcl, sprite_id)
+    blob.add("WALLS", walls, 4)
+
+    obstacles = bytearray()
+    for x, y, angle, name in obstacle_info:
+        world_x = ((x << 19) + (1 << 30)) & 0xFFFFFFFF
+        world_y = ((y << 19) + (1 << 30)) & 0xFFFFFFFF
+        obstacles += u32(world_x) + u32(world_y) + u16(angle) + u16(sprite_id[name])
+    blob.add("OBSTACLES", obstacles, 4)
+
+    models = [parse_i3d(jcl.get(f"CAR0N{car}B.I3D")) for car in range(6)]
+    car_sprites = bytearray()
+    for model in models:
+        car_sprites += rasterize_car_views(model)
+    blob.add("CAR_SPRITES", car_sprites, 4)
+
+    model_meta = bytearray()
+    for car, model in enumerate(models):
+        offset, nvertices, nfaces = add_model(blob, f"CAR{car}", model)
+        model_meta += u32(offset) + u16(nvertices) + u16(nfaces)
+    blob.add("MODEL_META", model_meta, 4)
+
+    output = args.out / "speed_haste_assets.bin"
+    output.write_bytes(blob.data)
+
+    header = [
+        "/* Generated by tools/import_speed_haste.py; do not edit. */",
+        "#ifndef SPEED_HASTE_ASSETS_GENERATED_H",
+        "#define SPEED_HASTE_ASSETS_GENERATED_H",
+        "#include <stdint.h>",
+        "extern const uint8_t binary_assets_generated_speed_haste_assets_bin_start[];",
+        "#define SH_ASSET_BASE (binary_assets_generated_speed_haste_assets_bin_start)",
+    ]
+    for name, offset in blob.offsets.items():
+        header.append(f"#define SHA_{name}_OFF {offset}u")
+    header += [
+        f"#define SHA_TILE_COUNT {len(combinations)}u",
+        f"#define SHA_PATH_COUNT {len(path) // 16}u",
+        f"#define SHA_START_COUNT {len(starts) // 8}u",
+        f"#define SHA_WALL_COUNT {wall_count}u",
+        f"#define SHA_OBSTACLE_COUNT {len(obstacle_info)}u",
+        f"#define SHA_SPRITE_COUNT {len(sprite_names)}u",
+        "enum SHSpriteId {",
+    ]
+    for name, index in sprite_id.items():
+        enum_name = name.replace(".", "_").replace("-", "_")
+        header.append(f"    SHSPR_{enum_name} = {index},")
+    header += ["};", "#endif", ""]
+    (args.out / "speed_haste_assets.h").write_text("\n".join(header))
+    (args.out / "manifest.txt").write_text(
+        f"Track: MAP00 Racer's Edge\nTiles: {len(combinations)}\nPath points: {len(path)//16}\n"
+        f"Starts: {len(starts)//8}\nWalls: {wall_count}\nObstacles: {len(obstacle_info)}\n"
+        f"Sprites: {len(sprite_names)}\nBlob bytes: {len(blob.data)}\n"
+    )
+    print((args.out / "manifest.txt").read_text(), end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,39 @@
+Speed Haste 32X — source-port performance revision
+================================================
+ROM: SpeedHaste32X.32x
+Size: 1,572,864 bytes (1.5 MiB)
+SHA-256: 24a87baa7f9bc96dc1b7218be0e16d5cafccaefa8c8a44042c40b7cbe0477198
+Genesis checksum: 0x85DC
+MARS master entry: 0x06000240
+MARS slave entry: 0x06000244
+
+Toolchain: 32XDK 20220418 / GCC 12.1.0
+Emulator: PicoDrive libretro 78a662e3135871a6c657d5e61900f6704152e594
+
+Content imported from original shareware SPEEDH.JCL
+- MAP00 "Racer's Edge"
+- 115 rotated floor tiles
+- 88 PATH points
+- 86 textured walls
+- 263 trackside objects
+- 106 IS2 assets
+- 6 original I3D cars, converted to 16 directional views each
+- Original title, panorama, mountains, cockpit, HUD and countdown
+
+Performance
+- Dual SH-2 floor/panorama rendering
+- Timer-independent 70 Hz simulation
+- 116 completed frames / 600 VBlanks
+- Measured output: 11.6 fps in pinned PicoDrive
+- Initial source-based revision: approximately 3–4 fps with slow-motion timing
+
+Verification: PASS
+- Original-data conversion tests
+- Static ROM/MARS/checksum tests
+- Title/menu/countdown/race/control/pause/finish E2E test
+- Black/frozen framebuffer checks
+- Minimum 10 fps performance gate
+- Acceleration changed 159,025 RGB bytes
+- Steering changed 148,490 RGB bytes
+
+Detailed report: ../test-results/emulator/report.json

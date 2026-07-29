@@ -1,0 +1,111 @@
+{
+  "core": "/home/user/.cache/speed-haste-32x/picodrive-78a662e3135871a6c657d5e61900f6704152e594/picodrive_libretro.so",
+  "rom": "/home/user/speed-haste-32x/release/SpeedHaste32X.32x",
+  "sequence": "title -> original menu -> countdown -> race -> accelerate -> steer -> pause/resume -> finish",
+  "01_original_title": {
+    "width": 320,
+    "height": 224,
+    "crc32": "452b7e01",
+    "unique_colors": 255,
+    "non_black_ratio": 0.776283,
+    "state_probe_rgb": [
+      57,
+      4,
+      0
+    ]
+  },
+  "vblanks_title_to_menu": 3,
+  "02_original_menu": {
+    "width": 320,
+    "height": 224,
+    "crc32": "7bbf22ff",
+    "unique_colors": 16,
+    "non_black_ratio": 0.642006,
+    "state_probe_rgb": [
+      238,
+      206,
+      180
+    ]
+  },
+  "vblanks_menu_to_countdown": 11,
+  "03_countdown": {
+    "width": 320,
+    "height": 224,
+    "crc32": "2cf52f7b",
+    "unique_colors": 114,
+    "non_black_ratio": 0.889174,
+    "state_probe_rgb": [
+      230,
+      190,
+      156
+    ]
+  },
+  "vblanks_countdown_to_race": 199,
+  "04_race_start": {
+    "width": 320,
+    "height": 224,
+    "crc32": "3211cf0b",
+    "unique_colors": 115,
+    "non_black_ratio": 0.884012,
+    "state_probe_rgb": [
+      213,
+      165,
+      131
+    ]
+  },
+  "completed_frames_in_600_vblanks": 116,
+  "measured_output_fps": 11.6,
+  "05_accelerated": {
+    "width": 320,
+    "height": 224,
+    "crc32": "712d7ced",
+    "unique_colors": 110,
+    "non_black_ratio": 0.889314,
+    "state_probe_rgb": [
+      213,
+      165,
+      131
+    ]
+  },
+  "06_steered": {
+    "width": 320,
+    "height": 224,
+    "crc32": "24ab9b3b",
+    "unique_colors": 102,
+    "non_black_ratio": 0.889202,
+    "state_probe_rgb": [
+      213,
+      165,
+      131
+    ]
+  },
+  "acceleration_changed_rgb_bytes": 159025,
+  "steering_changed_rgb_bytes": 148490,
+  "vblanks_to_pause": 13,
+  "07_paused": {
+    "width": 320,
+    "height": 224,
+    "crc32": "899dfc4d",
+    "unique_colors": 98,
+    "non_black_ratio": 0.889314,
+    "state_probe_rgb": [
+      205,
+      149,
+      115
+    ]
+  },
+  "vblanks_to_resume": 14,
+  "08_finished": {
+    "width": 320,
+    "height": 224,
+    "crc32": "8e55243c",
+    "unique_colors": 105,
+    "non_black_ratio": 0.889411,
+    "state_probe_rgb": [
+      189,
+      125,
+      98
+    ]
+  },
+  "result": "PASS"
+}
