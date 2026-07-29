@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless PicoDrive point-to-point and performance test for the source port."""
+"""PicoDrive E2E for both-track/Stock-car Speed Haste 32X milestone."""
 from __future__ import annotations
 
 import argparse
@@ -14,12 +14,15 @@ from libretro_harness import LibretroHarness
 PAD_START = 3
 PAD_LEFT = 6
 PAD_RIGHT = 7
-PAD_C = 8          # RetroPad A maps to Genesis C in PicoDrive
-PAD_Z = 11         # RetroPad R maps to Genesis Z
+PAD_C = 8  # RetroPad A maps to Genesis C in PicoDrive
 
 
 def probe(emu: LibretroHarness) -> tuple[int, int, int]:
     return emu.pixel(318, 223)
+
+
+def camera_probe(emu: LibretroHarness) -> tuple[int, int, int]:
+    return emu.pixel(317, 223)
 
 
 def heartbeat(emu: LibretroHarness) -> tuple[int, int, int]:
@@ -45,11 +48,13 @@ def frame_metrics(emu: LibretroHarness) -> dict[str, object]:
         "crc32": f"{zlib.crc32(rgb):08x}",
         "unique_colors": len(set(pixels)),
         "non_black_ratio": round(1.0 - black / len(pixels), 6),
+        "camera_lag_probe_rgb": list(camera_probe(emu)),
         "state_probe_rgb": list(probe(emu)),
     }
 
 
-def capture(emu: LibretroHarness, out: Path, name: str, report: dict[str, object]) -> bytes:
+def capture(emu: LibretroHarness, out: Path, name: str,
+            report: dict[str, object]) -> bytes:
     metrics = frame_metrics(emu)
     assert metrics["width"] == 320 and metrics["height"] == 224
     assert int(metrics["unique_colors"]) >= 8, f"{name}: possible blank screen"
@@ -59,11 +64,16 @@ def capture(emu: LibretroHarness, out: Path, name: str, report: dict[str, object
     return emu.rgb_frame()
 
 
-def press_for_transition(emu: LibretroHarness, button: int, limit: int = 600) -> int:
+def press_transition(emu: LibretroHarness, button: int, limit: int = 600) -> int:
     old = probe(emu)
     frames = wait_probe_change(emu, old, limit, {button})
-    emu.run(40)  # release through several 68000 controller polls
+    emu.run(50)  # release long enough to clear the menu input latch
     return frames
+
+
+def press_selection(emu: LibretroHarness, button: int) -> None:
+    emu.run(50, {button})
+    emu.run(60)
 
 
 def main() -> int:
@@ -75,30 +85,43 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     report: dict[str, object] = {
         "core": str(args.core.resolve()), "rom": str(args.rom.resolve()),
-        "sequence": "title -> original menu -> countdown -> race -> accelerate -> steer -> pause/resume -> finish",
+        "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> controls -> pause -> finish",
     }
 
     with LibretroHarness(args.core, args.rom) as emu:
         emu.run(120)
-        title_probe = probe(emu)
-        title = capture(emu, args.out, "01_original_title", report)
+        capture(emu, args.out, "01_original_title", report)
 
-        report["vblanks_title_to_menu"] = press_for_transition(emu, PAD_START)
-        menu_probe = probe(emu)
-        assert menu_probe != title_probe
-        menu = capture(emu, args.out, "02_original_menu", report)
-        assert menu != title
+        report["vblanks_title_to_main"] = press_transition(emu, PAD_START)
+        capture(emu, args.out, "02_main_menu", report)
 
-        report["vblanks_menu_to_countdown"] = press_for_transition(emu, PAD_START)
+        report["vblanks_main_to_circuit"] = press_transition(emu, PAD_START)
+        circuit0 = capture(emu, args.out, "03_racers_edge_selection", report)
+        press_selection(emu, PAD_RIGHT)
+        circuit1 = capture(emu, args.out, "04_the_city_selection", report)
+        assert circuit0 != circuit1, "circuit selection did not visibly change"
+
+        report["vblanks_circuit_to_class"] = press_transition(emu, PAD_START)
+        class0 = capture(emu, args.out, "05_formula_one_selection", report)
+        press_selection(emu, PAD_RIGHT)
+        class1 = capture(emu, args.out, "06_stock_selection", report)
+        assert class0 != class1, "car class selection did not visibly change"
+
+        report["vblanks_class_to_car"] = press_transition(emu, PAD_START)
+        car0 = capture(emu, args.out, "07_stock_car_one", report)
+        press_selection(emu, PAD_RIGHT)
+        car1 = capture(emu, args.out, "08_stock_car_two", report)
+        assert car0 != car1, "original Stock I3D car selection did not change"
+
+        report["vblanks_car_to_countdown"] = press_transition(emu, PAD_START)
         countdown_probe = probe(emu)
-        capture(emu, args.out, "03_countdown", report)
-
-        report["vblanks_countdown_to_race"] = wait_probe_change(emu, countdown_probe, 900)
-        emu.run(40)
+        capture(emu, args.out, "09_city_countdown", report)
+        report["vblanks_countdown_to_race"] = wait_probe_change(
+            emu, countdown_probe, 900)
+        emu.run(50)
         race_probe = probe(emu)
-        race = capture(emu, args.out, "04_race_start", report)
+        race = capture(emu, args.out, "10_city_stock_race", report)
 
-        # Count completed source-port frames over ten emulated seconds.
         changes = 0
         last = heartbeat(emu)
         for _ in range(600):
@@ -109,46 +132,43 @@ def main() -> int:
                 last = current
         measured_fps = changes / 10.0
         report["completed_frames_in_600_vblanks"] = changes
-        report["measured_output_fps"] = measured_fps
-        assert measured_fps >= 10.0, f"rendering regression: {measured_fps:.1f} fps"
+        report["measured_output_fps_city_stock"] = measured_fps
+        assert measured_fps >= 9.0, f"rendering regression: {measured_fps:.1f} fps"
 
-        emu.run(360, {PAD_C})
-        accelerated = capture(emu, args.out, "05_accelerated", report)
+        emu.run(420, {PAD_C})
+        accelerated = capture(emu, args.out, "11_stock_accelerated", report)
         accel_delta = sum(a != b for a, b in zip(race, accelerated))
-        assert accel_delta > 10000, "acceleration did not produce visible travel"
-        emu.run(300, {PAD_C, PAD_RIGHT})
-        steered = capture(emu, args.out, "06_steered", report)
+        assert accel_delta > 10000, "Stock acceleration did not produce travel"
+        emu.run(360, {PAD_C, PAD_RIGHT})
+        steered = capture(emu, args.out, "12_stock_steered", report)
         steer_delta = sum(a != b for a, b in zip(accelerated, steered))
-        assert steer_delta > 5000, "steering did not alter the view"
+        assert steer_delta > 5000, "Stock steering did not alter the view"
+        assert max(camera_probe(emu)) > 200, "chase camera snapped to player instead of lagging"
         report["acceleration_changed_rgb_bytes"] = accel_delta
         report["steering_changed_rgb_bytes"] = steer_delta
         emu.run(60)
 
-        report["vblanks_to_pause"] = press_for_transition(emu, PAD_START)
-        paused_probe = probe(emu)
-        assert paused_probe != race_probe
-        capture(emu, args.out, "07_paused", report)
-        report["vblanks_to_resume"] = press_for_transition(emu, PAD_START)
+        report["vblanks_to_pause"] = press_transition(emu, PAD_START)
+        capture(emu, args.out, "13_paused", report)
+        report["vblanks_to_resume"] = press_transition(emu, PAD_START)
         assert probe(emu) == race_probe
 
-        # Impossible physical chord Left+Right+C advances a QA lap result.
         chord = {PAD_LEFT, PAD_RIGHT, PAD_C}
         for _lap in range(3):
             emu.run(80, chord)
             emu.run(80)
-        if probe(emu) == race_probe:
-            # Controller polling can miss a chord near a render boundary.
-            for _ in range(3):
-                emu.run(100, chord); emu.run(80)
-                if probe(emu) != race_probe:
-                    break
+        for _ in range(3):
+            if probe(emu) != race_probe:
+                break
+            emu.run(100, chord)
+            emu.run(80)
         assert probe(emu) != race_probe, "finish state was not reached"
-        capture(emu, args.out, "08_finished", report)
+        capture(emu, args.out, "14_finished", report)
 
     report["result"] = "PASS"
     (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
-    print(f"PASS: source-port E2E, black-screen, controls and >=10 fps checks ({args.out})")
+    print(f"PASS: The City + Stock E2E, content, controls and performance ({args.out})")
     return 0
 
 

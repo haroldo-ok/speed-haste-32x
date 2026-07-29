@@ -1,8 +1,6 @@
-Track: MAP00 Racer's Edge
-Tiles: 115
-Path points: 88
-Starts: 20
-Walls: 86
-Obstacles: 263
-Sprites: 106
-Blob bytes: 1184772
+Tracks: 2 shareware circuits
+MAP00 Racer's Edge: tiles=115, path=88, starts=20, walls=86, objects=263
+MAP01 The City: tiles=190, path=186, starts=20, walls=123, objects=325
+Sprites: 112
+Car classes: 2 x 6 I3D models x 16 views
+Blob bytes: 2489924

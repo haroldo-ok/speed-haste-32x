@@ -89,6 +89,7 @@ $(TARGET).32x: $(TARGET).elf
 
 test-unit:
 	python3 tests/test_assets.py
+	python3 tests/test_projection.py
 
 test-static: rom
 	python3 tests/test_rom_static.py $(TARGET).32x

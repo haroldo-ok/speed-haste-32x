@@ -1,106 +1,251 @@
 {
   "core": "/home/user/.cache/speed-haste-32x/picodrive-78a662e3135871a6c657d5e61900f6704152e594/picodrive_libretro.so",
   "rom": "/home/user/speed-haste-32x/release/SpeedHaste32X.32x",
-  "sequence": "title -> original menu -> countdown -> race -> accelerate -> steer -> pause/resume -> finish",
+  "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> controls -> pause -> finish",
   "01_original_title": {
     "width": 320,
     "height": 224,
     "crc32": "452b7e01",
     "unique_colors": 255,
     "non_black_ratio": 0.776283,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
     "state_probe_rgb": [
       57,
       4,
       0
     ]
   },
-  "vblanks_title_to_menu": 3,
-  "02_original_menu": {
+  "vblanks_title_to_main": 3,
+  "02_main_menu": {
     "width": 320,
     "height": 224,
-    "crc32": "7bbf22ff",
-    "unique_colors": 16,
-    "non_black_ratio": 0.642006,
+    "crc32": "287f20ed",
+    "unique_colors": 18,
+    "non_black_ratio": 0.641727,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
     "state_probe_rgb": [
-      238,
-      206,
-      180
+      156,
+      76,
+      49
     ]
   },
-  "vblanks_menu_to_countdown": 11,
-  "03_countdown": {
+  "vblanks_main_to_circuit": 5,
+  "03_racers_edge_selection": {
     "width": 320,
     "height": 224,
-    "crc32": "2cf52f7b",
-    "unique_colors": 114,
-    "non_black_ratio": 0.889174,
+    "crc32": "900cc25d",
+    "unique_colors": 32,
+    "non_black_ratio": 0.83863,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      139,
+      60,
+      41
+    ]
+  },
+  "04_the_city_selection": {
+    "width": 320,
+    "height": 224,
+    "crc32": "2753e71b",
+    "unique_colors": 32,
+    "non_black_ratio": 0.83863,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      139,
+      60,
+      41
+    ]
+  },
+  "vblanks_circuit_to_class": 4,
+  "05_formula_one_selection": {
+    "width": 320,
+    "height": 224,
+    "crc32": "e09afe3b",
+    "unique_colors": 19,
+    "non_black_ratio": 0.892885,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      123,
+      44,
+      24
+    ]
+  },
+  "06_stock_selection": {
+    "width": 320,
+    "height": 224,
+    "crc32": "09d4b462",
+    "unique_colors": 19,
+    "non_black_ratio": 0.892885,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      123,
+      44,
+      24
+    ]
+  },
+  "vblanks_class_to_car": 4,
+  "07_stock_car_one": {
+    "width": 320,
+    "height": 224,
+    "crc32": "7d1f2220",
+    "unique_colors": 21,
+    "non_black_ratio": 0.884403,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      115,
+      36,
+      16
+    ]
+  },
+  "08_stock_car_two": {
+    "width": 320,
+    "height": 224,
+    "crc32": "313ab7c5",
+    "unique_colors": 21,
+    "non_black_ratio": 0.881055,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      115,
+      36,
+      16
+    ]
+  },
+  "vblanks_car_to_countdown": 10,
+  "09_city_countdown": {
+    "width": 320,
+    "height": 224,
+    "crc32": "19e6a690",
+    "unique_colors": 151,
+    "non_black_ratio": 0.863337,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
     "state_probe_rgb": [
       230,
       190,
       156
     ]
   },
-  "vblanks_countdown_to_race": 199,
-  "04_race_start": {
+  "vblanks_countdown_to_race": 192,
+  "10_city_stock_race": {
     "width": 320,
     "height": 224,
-    "crc32": "3211cf0b",
-    "unique_colors": 115,
-    "non_black_ratio": 0.884012,
+    "crc32": "3bdff977",
+    "unique_colors": 151,
+    "non_black_ratio": 0.858845,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
     "state_probe_rgb": [
       213,
       165,
       131
     ]
   },
-  "completed_frames_in_600_vblanks": 116,
-  "measured_output_fps": 11.6,
-  "05_accelerated": {
+  "completed_frames_in_600_vblanks": 100,
+  "measured_output_fps_city_stock": 10.0,
+  "11_stock_accelerated": {
     "width": 320,
     "height": 224,
-    "crc32": "712d7ced",
-    "unique_colors": 110,
-    "non_black_ratio": 0.889314,
+    "crc32": "4ea3b4a0",
+    "unique_colors": 155,
+    "non_black_ratio": 0.862402,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
     "state_probe_rgb": [
       213,
       165,
       131
     ]
   },
-  "06_steered": {
+  "12_stock_steered": {
     "width": 320,
     "height": 224,
-    "crc32": "24ab9b3b",
-    "unique_colors": 102,
-    "non_black_ratio": 0.889202,
+    "crc32": "634bfd14",
+    "unique_colors": 141,
+    "non_black_ratio": 0.867006,
+    "camera_lag_probe_rgb": [
+      238,
+      246,
+      255
+    ],
     "state_probe_rgb": [
       213,
       165,
       131
     ]
   },
-  "acceleration_changed_rgb_bytes": 159025,
-  "steering_changed_rgb_bytes": 148490,
-  "vblanks_to_pause": 13,
-  "07_paused": {
+  "acceleration_changed_rgb_bytes": 99053,
+  "steering_changed_rgb_bytes": 152182,
+  "vblanks_to_pause": 12,
+  "13_paused": {
     "width": 320,
     "height": 224,
-    "crc32": "899dfc4d",
-    "unique_colors": 98,
-    "non_black_ratio": 0.889314,
+    "crc32": "e9d7fb2f",
+    "unique_colors": 149,
+    "non_black_ratio": 0.86522,
+    "camera_lag_probe_rgb": [
+      238,
+      246,
+      255
+    ],
     "state_probe_rgb": [
       205,
       149,
       115
     ]
   },
-  "vblanks_to_resume": 14,
-  "08_finished": {
+  "vblanks_to_resume": 10,
+  "14_finished": {
     "width": 320,
     "height": 224,
-    "crc32": "8e55243c",
-    "unique_colors": 105,
-    "non_black_ratio": 0.889411,
+    "crc32": "d7f5410b",
+    "unique_colors": 133,
+    "non_black_ratio": 0.870703,
+    "camera_lag_probe_rgb": [
+      238,
+      246,
+      255
+    ],
     "state_probe_rgb": [
       189,
       125,

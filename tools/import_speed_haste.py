@@ -142,7 +142,14 @@ def rotate_tile(source: bytes, rotation: int) -> bytes:
     return bytes(out)
 
 
-def parse_map(jcl: JCL, number: int = 0):
+def parse_map(jcl: JCL, number: int):
+    """Convert one tDiskMap exactly as racemap.c does.
+
+    Each circuit keeps its own byte-indexed tile atlas. Sharing a combined
+    atlas would exceed 256 tile/rotation combinations across the two
+    shareware tracks and would make the SH-2 floor inner loop use 16-bit map
+    indices, which is measurably slower on 32X.
+    """
     data = jcl.get(f"MAP{number:02}.DAT")
     tile_numbers = struct.unpack_from("<4096H", data, 4)
     rotations = data[4 + 8192:4 + 8192 + 4096]
@@ -158,7 +165,6 @@ def parse_map(jcl: JCL, number: int = 0):
             atlas.extend(rotate_tile(source, key[1]))
         map64[index] = combinations[key]
 
-    # Original racemap.c installs the 64x64 disk map in the middle of 128x128.
     map128 = bytearray(128 * 128)
     for gy in range(32, 96):
         for gx in range(32, 96):
@@ -184,8 +190,8 @@ def parse_path(jcl: JCL, number: int = 0) -> bytes:
     return bytes(out)
 
 
-def parse_sectors(jcl: JCL, sprite_id: dict[str, int]):
-    lines = [line.strip() for line in jcl.get("MAP00.SEC").decode("ascii").replace("\r", "").split("\n")]
+def parse_sectors(jcl: JCL, number: int, sprite_id: dict[str, int]):
+    lines = [line.strip() for line in jcl.get(f"MAP{number:02}.SEC").decode("ascii").replace("\r", "").split("\n")]
     lines = [line for line in lines if line and not line.startswith(";")]
     vertex_count, sector_count, _side_count = (int(v, 0) for v in lines[0].split())
     cursor = 2  # skip header + Vertices
@@ -348,93 +354,113 @@ def main() -> int:
     blob.add("TITLE_PALETTE", jcl.get("SPHLOGO.PAL"), 4)
     blob.add("COLOR_MAP", jcl.get("GRAFS.CLR"), 4)
 
-    map_data, tile_atlas, combinations, things = parse_map(jcl)
-    blob.add("MAP128", map_data, 4)
-    blob.add("TILES", tile_atlas, 4)
-    blob.add("SKY", jcl.get("NUBES0.PIX"), 4)
-    blob.add("MOUNTAINS", jcl.get("MOUNT0.PIX"), 4)
-    blob.add("COCKPIT", jcl.get("SALP0.PIX"), 4)
+    track_names = ("Racer's Edge", "The City")
+    tracks = []
+    for number in range(2):
+        map_data, tile_atlas, combinations, things = parse_map(jcl, number)
+        path = parse_path(jcl, number)
+        starts = bytearray()
+        for x, y, angle, kind in things:
+            if kind >> 8 == 241:
+                starts += u16(x) + u16(y) + u16((0x4000 - angle) & 0xFFFF) + u16(0)
+        tracks.append({
+            "number": number, "map": map_data, "tiles": tile_atlas,
+            "combinations": combinations, "things": things,
+            "path": path, "starts": bytes(starts), "obstacles": [],
+        })
+        blob.add(f"MAP{number}_MAP128", map_data, 4)
+        blob.add(f"MAP{number}_TILES", tile_atlas, 4)
+        blob.add(f"MAP{number}_SKY", jcl.get(f"NUBES{number}.PIX"), 4)
+        blob.add(f"MAP{number}_MOUNTAINS", jcl.get(f"MOUNT{number}.PIX"), 4)
+        blob.add(f"MAP{number}_PATH", path, 4)
+        blob.add(f"MAP{number}_STARTS", starts, 4)
+
+    blob.add("COCKPIT0", jcl.get("SALP0.PIX"), 4)
+    blob.add("COCKPIT1", jcl.get("SALP1.PIX"), 4)
     blob.add("TITLE", jcl.get("SPHLOGO.PIX"), 4)
-    blob.add("MENU", jcl.get("MBG_PRIN.PIX"), 4)
-    path = parse_path(jcl)
-    blob.add("PATH", path, 4)
+    blob.add("MENU_MAIN", jcl.get("MBG_PRIN.PIX"), 4)
+    blob.add("MENU_CIRCUIT", jcl.get("MBG_CIRC.PIX"), 4)
+    blob.add("MENU_CAR", jcl.get("MBG_CAR.PIX"), 4)
 
-    starts = bytearray()
-    for x, y, angle, kind in things:
-        if kind >> 8 == 241:
-            starts += u16(x) + u16(y) + u16((0x4000 - angle) & 0xFFFF) + u16(0)
-    blob.add("STARTS", starts, 4)
-
-    # Decode all wall textures, HUD, countdown, and visible map sprites.
+    # Decode wall textures, HUD, countdown, and visible sprites from both maps.
     wall_names = set()
-    sec_text = jcl.get("MAP00.SEC").decode("ascii")
-    for line in sec_text.replace("\r", "").split("\n"):
-        try:
-            fields = shlex.split(line.strip())
-        except ValueError:
-            continue
-        if len(fields) == 4 and fields[2]:
-            wall_names.add(fields[2].upper() + ".IS2")
+    for number in range(2):
+        sec_text = jcl.get(f"MAP{number:02}.SEC").decode("ascii")
+        for line in sec_text.replace("\r", "").split("\n"):
+            try:
+                fields = shlex.split(line.strip())
+            except ValueError:
+                continue
+            if len(fields) == 4 and fields[2]:
+                wall_names.add(fields[2].upper() + ".IS2")
 
     hud_names = [
-        "MGEAR.IS2", "MREVO0.IS2", "MLAPS.IS2", "MPOS.IS2", "MPOSBAR.IS2",
-        "MLAP.IS2", "MBEST.IS2", "PAUSE.IS2", "RFINLAP.IS2", "ENDRACE.IS2",
-        "YOUWIN.IS2", "RACE_0.IS2", "RACE_1.IS2", "RACE_2.IS2", "RACE_3.IS2",
-        "MFBGB.IS2", "MFMGB.IS2", "MWQUOTE.IS2", "MWDQUOTE.IS2",
-        "MGQUOTE.IS2", "MGDQUOTE.IS2",
+        "MGEAR.IS2", "MREVO0.IS2", "MREVO1.IS2", "MLAPS.IS2", "MPOS.IS2",
+        "MPOSBAR.IS2", "MLAP.IS2", "MBEST.IS2", "PAUSE.IS2", "RFINLAP.IS2",
+        "ENDRACE.IS2", "YOUWIN.IS2", "RACE_0.IS2", "RACE_1.IS2",
+        "RACE_2.IS2", "RACE_3.IS2", "MFBGB.IS2", "MFMGB.IS2",
+        "MWQUOTE.IS2", "MWDQUOTE.IS2", "MGQUOTE.IS2", "MGDQUOTE.IS2",
     ]
     for prefix in ("MFBG", "MFBW", "MFMG", "MFMW", "MFLW", "MFLG", "MG"):
         for digit in range(10):
             hud_names.append(f"{prefix}{digit}.IS2")
 
     obstacle_names = set()
-    obstacle_info = []
-    for x, y, angle, kind in things:
-        if kind >= 0xF000:
-            continue
-        transformed = ((kind & 0xFF00) >> 4) + (kind & 0xF)
-        name = f"XPR{transformed:03X}.IS2"
-        if jcl.maybe(name):
-            obstacle_names.add(name)
-            obstacle_info.append((x, y, (0x4000 - angle) & 0xFFFF, name))
+    for track in tracks:
+        obstacle_info = []
+        for x, y, angle, kind in track["things"]:
+            if kind >= 0xF000:
+                continue
+            transformed = ((kind & 0xFF00) >> 4) + (kind & 0xF)
+            name = f"XPR{transformed:03X}.IS2"
+            if jcl.maybe(name):
+                obstacle_names.add(name)
+                obstacle_info.append((x, y, (0x4000 - angle) & 0xFFFF, name))
+        track["obstacles"] = obstacle_info
 
     sprite_names = sorted(wall_names) + [n for n in hud_names if jcl.maybe(n)] + sorted(obstacle_names)
-    # Stable de-duplication.
     sprite_names = list(dict.fromkeys(sprite_names))
     sprite_id = {name: index for index, name in enumerate(sprite_names)}
     sprite_meta = bytearray()
-    decoded_sprites: list[IS2] = []
     for name in sprite_names:
         sprite = decode_is2(jcl.get(name))
-        decoded_sprites.append(sprite)
         pixel_offset = blob.add("SPRITE_" + name.replace(".", "_"), sprite.pixels, 4)
-        # World dimensions exactly as FS3_Load computes them.
         world_w = sprite.xratio * sprite.width * 0x2000 // (55 << 8)
         world_h = sprite.yratio * sprite.height * 0x2000 // (66 << 8)
         sprite_meta += u32(pixel_offset) + u16(sprite.width) + u16(sprite.height)
         sprite_meta += s16(sprite.dx) + s16(sprite.dy) + u32(world_w) + u32(world_h)
     blob.add("SPRITE_META", sprite_meta, 4)
 
-    walls, wall_count = parse_sectors(jcl, sprite_id)
-    blob.add("WALLS", walls, 4)
+    for track in tracks:
+        number = track["number"]
+        walls, wall_count = parse_sectors(jcl, number, sprite_id)
+        track["wall_count"] = wall_count
+        blob.add(f"MAP{number}_WALLS", walls, 4)
+        obstacles = bytearray()
+        for x, y, angle, name in track["obstacles"]:
+            world_x = ((x << 19) + (1 << 30)) & 0xFFFFFFFF
+            world_y = ((y << 19) + (1 << 30)) & 0xFFFFFFFF
+            obstacles += u32(world_x) + u32(world_y) + u16(angle) + u16(sprite_id[name])
+        blob.add(f"MAP{number}_OBSTACLES", obstacles, 4)
 
-    obstacles = bytearray()
-    for x, y, angle, name in obstacle_info:
-        world_x = ((x << 19) + (1 << 30)) & 0xFFFFFFFF
-        world_y = ((y << 19) + (1 << 30)) & 0xFFFFFFFF
-        obstacles += u32(world_x) + u32(world_y) + u16(angle) + u16(sprite_id[name])
-    blob.add("OBSTACLES", obstacles, 4)
-
-    models = [parse_i3d(jcl.get(f"CAR0N{car}B.I3D")) for car in range(6)]
+    # Use the high-detail A meshes for the runtime directional frames so front
+    # and rear (nose, cockpit, rear wing/deck) remain visually distinct. Keep
+    # the compact B meshes as optional polygon/fallback data.
+    sprite_models = [[parse_i3d(jcl.get(f"CAR{car_type}N{car}A.I3D"))
+                      for car in range(6)] for car_type in range(2)]
+    fallback_models = [[parse_i3d(jcl.get(f"CAR{car_type}N{car}B.I3D"))
+                        for car in range(6)] for car_type in range(2)]
     car_sprites = bytearray()
-    for model in models:
-        car_sprites += rasterize_car_views(model)
+    for car_type in range(2):
+        for model in sprite_models[car_type]:
+            car_sprites += rasterize_car_views(model)
     blob.add("CAR_SPRITES", car_sprites, 4)
 
     model_meta = bytearray()
-    for car, model in enumerate(models):
-        offset, nvertices, nfaces = add_model(blob, f"CAR{car}", model)
-        model_meta += u32(offset) + u16(nvertices) + u16(nfaces)
+    for car_type in range(2):
+        for car, model in enumerate(fallback_models[car_type]):
+            offset, nvertices, nfaces = add_model(blob, f"CAR{car_type}_{car}", model)
+            model_meta += u32(offset) + u16(nvertices) + u16(nfaces)
     blob.add("MODEL_META", model_meta, 4)
 
     output = args.out / "speed_haste_assets.bin"
@@ -451,11 +477,17 @@ def main() -> int:
     for name, offset in blob.offsets.items():
         header.append(f"#define SHA_{name}_OFF {offset}u")
     header += [
-        f"#define SHA_TILE_COUNT {len(combinations)}u",
-        f"#define SHA_PATH_COUNT {len(path) // 16}u",
-        f"#define SHA_START_COUNT {len(starts) // 8}u",
-        f"#define SHA_WALL_COUNT {wall_count}u",
-        f"#define SHA_OBSTACLE_COUNT {len(obstacle_info)}u",
+        "#define SHA_TRACK_COUNT 2u",
+        f"#define SHA_MAP0_TILE_COUNT {len(tracks[0]['combinations'])}u",
+        f"#define SHA_MAP0_PATH_COUNT {len(tracks[0]['path']) // 16}u",
+        f"#define SHA_MAP0_START_COUNT {len(tracks[0]['starts']) // 8}u",
+        f"#define SHA_MAP0_WALL_COUNT {tracks[0]['wall_count']}u",
+        f"#define SHA_MAP0_OBSTACLE_COUNT {len(tracks[0]['obstacles'])}u",
+        f"#define SHA_MAP1_TILE_COUNT {len(tracks[1]['combinations'])}u",
+        f"#define SHA_MAP1_PATH_COUNT {len(tracks[1]['path']) // 16}u",
+        f"#define SHA_MAP1_START_COUNT {len(tracks[1]['starts']) // 8}u",
+        f"#define SHA_MAP1_WALL_COUNT {tracks[1]['wall_count']}u",
+        f"#define SHA_MAP1_OBSTACLE_COUNT {len(tracks[1]['obstacles'])}u",
         f"#define SHA_SPRITE_COUNT {len(sprite_names)}u",
         "enum SHSpriteId {",
     ]
@@ -465,9 +497,15 @@ def main() -> int:
     header += ["};", "#endif", ""]
     (args.out / "speed_haste_assets.h").write_text("\n".join(header))
     (args.out / "manifest.txt").write_text(
-        f"Track: MAP00 Racer's Edge\nTiles: {len(combinations)}\nPath points: {len(path)//16}\n"
-        f"Starts: {len(starts)//8}\nWalls: {wall_count}\nObstacles: {len(obstacle_info)}\n"
-        f"Sprites: {len(sprite_names)}\nBlob bytes: {len(blob.data)}\n"
+        "Tracks: 2 shareware circuits\n"
+        f"MAP00 {track_names[0]}: tiles={len(tracks[0]['combinations'])}, "
+        f"path={len(tracks[0]['path'])//16}, starts={len(tracks[0]['starts'])//8}, "
+        f"walls={tracks[0]['wall_count']}, objects={len(tracks[0]['obstacles'])}\n"
+        f"MAP01 {track_names[1]}: tiles={len(tracks[1]['combinations'])}, "
+        f"path={len(tracks[1]['path'])//16}, starts={len(tracks[1]['starts'])//8}, "
+        f"walls={tracks[1]['wall_count']}, objects={len(tracks[1]['obstacles'])}\n"
+        f"Sprites: {len(sprite_names)}\nCar classes: 2 x 6 I3D models x 16 views\n"
+        f"Blob bytes: {len(blob.data)}\n"
     )
     print((args.out / "manifest.txt").read_text(), end="")
     return 0
