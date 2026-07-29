@@ -1,0 +1,8 @@
+Track: MAP00 Racer's Edge
+Tiles: 115
+Path points: 88
+Starts: 20
+Walls: 86
+Obstacles: 263
+Sprites: 106
+Blob bytes: 1184772
