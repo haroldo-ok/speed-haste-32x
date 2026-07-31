@@ -1,13 +1,13 @@
 {
   "core": "/home/user/.cache/speed-haste-32x/picodrive-78a662e3135871a6c657d5e61900f6704152e594/picodrive_libretro.so",
   "rom": "/home/user/speed-haste-32x/release/SpeedHaste32X.32x",
-  "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> controls -> pause -> finish",
+  "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> wall impact -> recovery -> pause -> finish",
   "01_original_title": {
     "width": 320,
     "height": 224,
-    "crc32": "452b7e01",
+    "crc32": "10b6b7b4",
     "unique_colors": 255,
-    "non_black_ratio": 0.776283,
+    "non_black_ratio": 0.776311,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -23,9 +23,9 @@
   "02_main_menu": {
     "width": 320,
     "height": 224,
-    "crc32": "287f20ed",
-    "unique_colors": 18,
-    "non_black_ratio": 0.641727,
+    "crc32": "e570e957",
+    "unique_colors": 19,
+    "non_black_ratio": 0.641755,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -41,9 +41,9 @@
   "03_racers_edge_selection": {
     "width": 320,
     "height": 224,
-    "crc32": "900cc25d",
-    "unique_colors": 32,
-    "non_black_ratio": 0.83863,
+    "crc32": "5d030be7",
+    "unique_colors": 33,
+    "non_black_ratio": 0.838658,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -58,9 +58,9 @@
   "04_the_city_selection": {
     "width": 320,
     "height": 224,
-    "crc32": "2753e71b",
-    "unique_colors": 32,
-    "non_black_ratio": 0.83863,
+    "crc32": "ea5c2ea1",
+    "unique_colors": 33,
+    "non_black_ratio": 0.838658,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -76,9 +76,9 @@
   "05_formula_one_selection": {
     "width": 320,
     "height": 224,
-    "crc32": "e09afe3b",
-    "unique_colors": 19,
-    "non_black_ratio": 0.892885,
+    "crc32": "2d953781",
+    "unique_colors": 20,
+    "non_black_ratio": 0.892913,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -93,9 +93,9 @@
   "06_stock_selection": {
     "width": 320,
     "height": 224,
-    "crc32": "09d4b462",
-    "unique_colors": 19,
-    "non_black_ratio": 0.892885,
+    "crc32": "c4db7dd8",
+    "unique_colors": 20,
+    "non_black_ratio": 0.892913,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -111,9 +111,9 @@
   "07_stock_car_one": {
     "width": 320,
     "height": 224,
-    "crc32": "7d1f2220",
+    "crc32": "4b045226",
     "unique_colors": 21,
-    "non_black_ratio": 0.884403,
+    "non_black_ratio": 0.883371,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -128,9 +128,9 @@
   "08_stock_car_two": {
     "width": 320,
     "height": 224,
-    "crc32": "313ab7c5",
-    "unique_colors": 21,
-    "non_black_ratio": 0.881055,
+    "crc32": "b3585331",
+    "unique_colors": 22,
+    "non_black_ratio": 0.877734,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -142,13 +142,13 @@
       16
     ]
   },
-  "vblanks_car_to_countdown": 10,
+  "vblanks_car_to_countdown": 9,
   "09_city_countdown": {
     "width": 320,
     "height": 224,
-    "crc32": "19e6a690",
-    "unique_colors": 151,
-    "non_black_ratio": 0.863337,
+    "crc32": "720055a6",
+    "unique_colors": 153,
+    "non_black_ratio": 0.850949,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -160,13 +160,13 @@
       156
     ]
   },
-  "vblanks_countdown_to_race": 192,
+  "vblanks_countdown_to_race": 188,
   "10_city_stock_race": {
     "width": 320,
     "height": 224,
-    "crc32": "3bdff977",
-    "unique_colors": 151,
-    "non_black_ratio": 0.858845,
+    "crc32": "b3b6e836",
+    "unique_colors": 150,
+    "non_black_ratio": 0.813477,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -178,14 +178,31 @@
       131
     ]
   },
-  "completed_frames_in_600_vblanks": 100,
-  "measured_output_fps_city_stock": 10.0,
+  "10b_city_tv_camera": {
+    "width": 320,
+    "height": 224,
+    "crc32": "d2ce52d3",
+    "unique_colors": 148,
+    "non_black_ratio": 0.851437,
+    "camera_lag_probe_rgb": [
+      0,
+      4,
+      0
+    ],
+    "state_probe_rgb": [
+      213,
+      165,
+      131
+    ]
+  },
+  "completed_frames_in_600_vblanks": 120,
+  "measured_output_fps_city_stock": 12.0,
   "11_stock_accelerated": {
     "width": 320,
     "height": 224,
-    "crc32": "4ea3b4a0",
-    "unique_colors": 155,
-    "non_black_ratio": 0.862402,
+    "crc32": "9a40fc92",
+    "unique_colors": 157,
+    "non_black_ratio": 0.850098,
     "camera_lag_probe_rgb": [
       0,
       4,
@@ -200,9 +217,9 @@
   "12_stock_steered": {
     "width": 320,
     "height": 224,
-    "crc32": "634bfd14",
-    "unique_colors": 141,
-    "non_black_ratio": 0.867006,
+    "crc32": "8b206ea5",
+    "unique_colors": 153,
+    "non_black_ratio": 0.851256,
     "camera_lag_probe_rgb": [
       238,
       246,
@@ -214,15 +231,44 @@
       131
     ]
   },
-  "acceleration_changed_rgb_bytes": 99053,
-  "steering_changed_rgb_bytes": 152182,
-  "vblanks_to_pause": 12,
+  "collision_probe_rgb": [
+    238,
+    246,
+    255
+  ],
+  "wall_collision_probe_rgb": [
+    238,
+    246,
+    255
+  ],
+  "acceleration_changed_rgb_bytes": 103292,
+  "steering_changed_rgb_bytes": 143632,
+  "12b_wall_collision_recovered": {
+    "width": 320,
+    "height": 224,
+    "crc32": "c164b007",
+    "unique_colors": 150,
+    "non_black_ratio": 0.863895,
+    "camera_lag_probe_rgb": [
+      238,
+      246,
+      255
+    ],
+    "state_probe_rgb": [
+      213,
+      165,
+      131
+    ]
+  },
+  "wall_recovery_position_changes": 53,
+  "wall_recovery_changed_rgb_bytes": 149535,
+  "vblanks_to_pause": 9,
   "13_paused": {
     "width": 320,
     "height": 224,
-    "crc32": "e9d7fb2f",
-    "unique_colors": 149,
-    "non_black_ratio": 0.86522,
+    "crc32": "6a80e887",
+    "unique_colors": 141,
+    "non_black_ratio": 0.859487,
     "camera_lag_probe_rgb": [
       238,
       246,
@@ -238,9 +284,9 @@
   "14_finished": {
     "width": 320,
     "height": 224,
-    "crc32": "d7f5410b",
-    "unique_colors": 133,
-    "non_black_ratio": 0.870703,
+    "crc32": "fd4b8ab6",
+    "unique_colors": 135,
+    "non_black_ratio": 0.851981,
     "camera_lag_probe_rgb": [
       238,
       246,

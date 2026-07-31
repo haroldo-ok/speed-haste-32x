@@ -18,10 +18,12 @@ This revision ports both circuits and vehicle classes from the original sharewar
 - original panorama, mountains, wall textures, trackside sprites and palette shading;
 - original title and race-menu backgrounds;
 - multi-step setup flow for circuit, class and individual car selection;
-- countdown, lap/position HUD, three cameras, pause and finish states;
-- PATH-driven computer racers based on `cars.c` and `racemap.c`.
+- countdown, lap/position HUD, chase/cockpit/high/trackside-TV cameras, pause and finish states;
+- PATH-driven computer racers based on `cars.c` and `racemap.c`;
+- source-backed guardrail and car-to-car collision response, including wall-release hysteresis and the original crash-recovery phase;
+- original spark, ground-smoke and persistent skid graphics.
 
-The world runs at the original **70 Hz simulation rate**, independently of video. The pinned PicoDrive test measures **11.6 fps** on Racer's Edge and **10.0 fps** on the larger City/Stock configuration, without slow-motion physics.
+The world runs at the original **70 Hz simulation rate**, independently of video. The pinned PicoDrive City/Stock stress test measures **12.0 fps** without slow-motion physics.
 
 ## Play
 
@@ -45,7 +47,7 @@ The cartridge is 2.5 MiB and has a valid MARS header and Genesis checksum.
 | B or C | Accelerate |
 | A or Down | Brake; continue holding for reverse |
 | Start | Pause/resume |
-| X (six-button pad) | Cycle chase, cockpit and high cameras |
+| X (six-button pad) | Cycle chase, cockpit, high and trackside-TV cameras |
 | Y (six-button pad) | Toggle HUD |
 
 Stock cars can break traction under hard high-speed steering/braking and then progressively regain it, following the separate `cartype == 1` path in the DOS source.
@@ -61,7 +63,13 @@ The current renderer uses:
 - an eight-frame cached textured minimap;
 - all 12 I3D cars pre-rendered into the original engine's 16-direction sprite path;
 - 32-bit framebuffer fills and packed writes;
-- 70 Hz timer catch-up from `race.c`, so rendering never determines game speed.
+- 70 Hz timer catch-up from `race.c`, so rendering never determines game speed;
+- SH7604 hardware-divider helpers adapted from D32XR's fixed-point routines;
+- frequency-sorted 28-tile SDRAM cache covering 95% of Racer's Edge and 92% of The City map cells;
+- cached map indices, panoramas, mountain layer, and 8 KiB shade table in aligned SDRAM;
+- build-time `SEC_TOMAP` wall conversion and DDA wall interpolation with no divide/modulo in horizontal loops;
+- broad-phase collision rejection before closest-point projection;
+- no-divide integer normalisation only after a real wall contact, never in the normal 70 Hz scan.
 
 PWM audio remains disabled by default because continuous slave-SH-2 FIFO polling stalls some ARM PicoDrive builds. The slave is used for floor rendering instead.
 
@@ -99,10 +107,10 @@ The PicoDrive E2E selects the newly added content through emulated pad input:
 
 ```text
 title → main menu → The City → Stock → car selection → countdown
-      → race → accelerate → steer → pause/resume → finish
+      → race → accelerate → wall impact → drive away → pause/resume → finish
 ```
 
-The suite captures 14 points, rejects black/frozen output, verifies selection changes, visible travel, shared floor/object projection, directional-car orientation and active chase-camera lag, and enforces a 9 fps minimum on The City. Current result: **10.0 fps**, 98,874 RGB bytes changed by acceleration and 156,532 by steering.
+The suite captures 16 points, rejects black/frozen output, verifies selection changes, visible travel, source-wall collision and recovery, trackside cameras, shared floor/object projection, directional-car orientation and active chase-camera lag, and enforces a 9 fps minimum on The City. The anti-stick point-to-point gate steers into a wall, reverses steering, and requires the encoded world position to keep changing. Current result: **12.0 fps**, 103,292 RGB bytes changed by acceleration, 143,632 by steering/collision, and 53 position-probe changes while driving away.
 
 See [`test-results/emulator/report.json`](test-results/emulator/report.json).
 
@@ -118,4 +126,4 @@ See [`test-results/emulator/report.json`](test-results/emulator/report.json).
 
 ## Scope still in progress
 
-Not yet ported: two-player split screen, persistent record tables, IPX/serial/modem play, complete DOS menu decoration/animation, S3M music and VTAL effects. The registered-only six circuits are not present in the supplied shareware data and are not claimed as implemented.
+Not yet ported: two-player split screen, persistent record tables, IPX/serial/modem play, complete DOS menu decoration/animation, S3M music and VTAL audio. The registered-only six circuits are not present in the supplied shareware data and are not claimed as implemented.

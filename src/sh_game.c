@@ -5,9 +5,12 @@
  */
 #include "sh_game.h"
 #include "sh_assets.h"
+#include "platform/sh2_math.h"
 
 #define FP30_ONE (1L << 30)
 #define MAX_REVO (1L << 22)
+#define WALL_COLLISION_RADIUS 32
+#define WALL_RELEASE_RADIUS 36
 
 static const uint16_t car_max_speed[2][6] = {
     {310, 315, 320, 320, 325, 330}, /* Formula One, CARS.LST */
@@ -21,9 +24,57 @@ static uint16_t class_reference_speed(uint8_t car_type)
 
 static int32_t abs32(int32_t value) { return value < 0 ? -value : value; }
 static int32_t mul30(int32_t value, int32_t trig) { return (int32_t)(((int64_t)value * trig) >> 30); }
-static int32_t muldiv(int32_t a, int32_t b, int32_t c)
+static inline __attribute__((always_inline)) int32_t muldiv(int32_t a, int32_t b, int32_t c)
 {
-    return c ? (int32_t)(((int64_t)a * b) / c) : 0;
+    return c ? sh2_muldiv(a, b, c) : 0;
+}
+
+/* Restoring square root: no divide and only used after the broad phase has
+ * found an actual contact. Keeping it off the normal 70 Hz path is cheaper
+ * than normalising every source wall in the scan. */
+static uint32_t isqrt32(uint32_t value)
+{
+    uint32_t root = 0;
+    uint32_t bit = 1u << 30;
+    while (bit > value) bit >>= 2;
+    while (bit) {
+        if (value >= root + bit) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    return root;
+}
+
+static void nearest_wall_point(int32_t px, int32_t py, int32_t x0, int32_t y0,
+                               int32_t vx, int32_t vy, int32_t length2,
+                               int32_t *qx, int32_t *qy)
+{
+    int32_t t = muldiv((px - x0) * vx + (py - y0) * vy, 65536, length2);
+    if (t < 0) t = 0;
+    else if (t > 65536) t = 65536;
+    *qx = x0 + ((vx * t) >> 16);
+    *qy = y0 + ((vy * t) >> 16);
+}
+
+/* Place the centre on the known road side of a wall with a small release
+ * margin. The margin is deliberate hysteresis: a car that has just bounced or
+ * is reversing away must not be reflected back into the same wall on the next
+ * simulation tick. Coordinates here use the collision pass's 14.18 -> integer
+ * reduction; converting through uint32_t keeps world wrapping defined. */
+static void release_from_wall(SHCar *car, int32_t qx, int32_t qy,
+                              int32_t nx, int32_t ny)
+{
+    uint32_t distance = isqrt32((uint32_t)(nx * nx + ny * ny));
+    int32_t rx, ry;
+    if (!distance) return;
+    rx = qx + muldiv(nx, WALL_RELEASE_RADIUS, (int32_t)distance);
+    ry = qy + muldiv(ny, WALL_RELEASE_RADIUS, (int32_t)distance);
+    car->x = ((uint32_t)rx) << 18;
+    car->y = ((uint32_t)ry) << 18;
 }
 
 /* Original GearInfo table: ratio 16.16, acceleration and RPM limits. */
@@ -38,21 +89,6 @@ static const GearInfo gears[] = {
     { 0xC000, 0x01C00, 5 << 18, 0x0D << 18},
     {0x10000, 0x01000, 6 << 18, 0x0D << 18}
 };
-
-static uint16_t vector_angle(int32_t dx, int32_t dy)
-{
-    uint32_t ax = (uint32_t)abs32(dx), ay = (uint32_t)abs32(dy);
-    uint16_t base;
-    if ((ax | ay) == 0) return 0;
-    if (ax >= ay)
-        base = (uint16_t)((uint64_t)ay * 8192u / (ax ? ax : 1));
-    else
-        base = (uint16_t)(16384u - (uint64_t)ax * 8192u / ay);
-    if (dx >= 0 && dy >= 0) return base;
-    if (dx < 0 && dy >= 0) return (uint16_t)(32768u - base);
-    if (dx < 0) return (uint16_t)(32768u + base);
-    return (uint16_t)(0u - base);
-}
 
 static void get_start(uint8_t track, unsigned index, SHCar *car)
 {
@@ -87,8 +123,12 @@ uint8_t sh_ground_color(uint8_t track, uint32_t x, uint32_t y)
     sha_get_track(track, &assets);
     if (gx >= 128 || gy >= 128) return 0;
     tile = assets.map[gy * 128u + gx];
-    return assets.tiles[(uint32_t)tile * 4096u +
-                        (((y >> 19) & 63u) << 6) + ((x >> 19) & 63u)];
+    {
+        const uint8_t *pixels = tile < assets.cached_tile_count ?
+            assets.cached_tiles + (uint32_t)tile * 4096u :
+            assets.tiles + (uint32_t)tile * 4096u;
+        return pixels[(((y >> 19) & 63u) << 6) + ((x >> 19) & 63u)];
+    }
 }
 
 static void set_ai_target(uint8_t track, SHCar *car)
@@ -102,6 +142,8 @@ static void set_ai_target(uint8_t track, SHCar *car)
 static void reset_race(SHGame *game)
 {
     unsigned i;
+    /* Load the frequency-sorted map working set into aligned SDRAM. */
+    sha_prepare_track(game->selected_track);
     clear_car(&game->player);
     get_start(game->selected_track, 0, &game->player);
     game->player.model = game->selected_car % 6;
@@ -119,6 +161,9 @@ static void reset_race(SHGame *game)
         game->ai[i].next_point = 0;
         set_ai_target(game->selected_track, &game->ai[i]);
     }
+    for (i = 0; i < SH_EFFECTS; ++i) game->effects[i].type = SH_FX_NONE;
+    game->collision_count = 0;
+    game->wall_collision_count = 0;
     game->race_ticks = 0;
     game->countdown = 3 * 70 + 69; /* race.c startDelay */
     game->mode = SH_MODE_COUNTDOWN;
@@ -148,7 +193,7 @@ static void update_lap(uint8_t track, SHCar *car)
     sha_get_path(track, car->npoint, &point);
     dx = (int32_t)((((point.x >> 1) + (1u << 30)) >> 18) - (car->x >> 18));
     dy = (int32_t)((((point.y >> 1) + (1u << 30)) >> 18) - (car->y >> 18));
-    angle = vector_angle(dx, -dy);
+    angle = sha_vector_angle(dx, -dy);
     if (abs32((int16_t)(angle - (uint16_t)point.direction)) > 0x4000) {
         ++car->npoint;
         if (car->npoint >= assets.path_count) {
@@ -169,9 +214,121 @@ static void update_lap(uint8_t track, SHCar *car)
     }
 }
 
-static void player_tick(uint8_t track, SHCar *p, uint16_t pad, int race_started)
+static void add_effect(SHGame *game, uint8_t type, uint32_t x, uint32_t y,
+                       uint32_t z, int32_t dx, int32_t dy, uint16_t angle,
+                       uint8_t variant)
 {
+    unsigned i;
+    SHEffect *effect = &game->effects[game->frame & (SH_EFFECTS - 1)];
+    for (i = 0; i < SH_EFFECTS; ++i)
+        if (game->effects[i].type == SH_FX_NONE) { effect = &game->effects[i]; break; }
+    effect->x = x; effect->y = y; effect->z = z;
+    effect->dx = dx; effect->dy = dy;
+    effect->age = 0; effect->angle = angle;
+    effect->type = type; effect->variant = variant;
+    effect->life = type == SH_FX_SKID ? 210 : (type == SH_FX_SMOKE ? 50 : 30);
+}
+
+static void update_effects(SHGame *game)
+{
+    unsigned i;
+    for (i = 0; i < SH_EFFECTS; ++i) {
+        SHEffect *effect = &game->effects[i];
+        if (effect->type == SH_FX_NONE) continue;
+        if (++effect->age >= effect->life) { effect->type = SH_FX_NONE; continue; }
+        if (effect->type != SH_FX_SKID) {
+            effect->x += (uint32_t)effect->dx;
+            effect->y += (uint32_t)effect->dy;
+            effect->dx -= effect->dx >> 4;
+            effect->dy -= effect->dy >> 4;
+            if (effect->type == SH_FX_SMOKE) effect->z += 0x1800;
+        }
+    }
+}
+
+static int collide_with_wall(SHGame *game, SHCar *car, uint32_t old_x, uint32_t old_y)
+{
+    SHTrackAssets assets;
+    const int32_t cx = ((int32_t)car->x) >> 18;
+    const int32_t cy = ((int32_t)car->y) >> 18;
+    const int32_t old_cx = ((int32_t)old_x) >> 18;
+    const int32_t old_cy = ((int32_t)old_y) >> 18;
+    unsigned i;
+    sha_get_track(game->selected_track, &assets);
+    for (i = 0; i < assets.wall_count; ++i) {
+        const uint8_t *record = assets.walls + i * 20u;
+        int32_t x0, y0, vx, vy, length2, qx, qy, dx, dy;
+        if (!(sha_rd16(record + 18) & SH_WALL_COLLIDABLE)) continue;
+        x0 = ((int32_t)sha_rd32(record)) >> 18;
+        y0 = ((int32_t)sha_rd32(record + 4)) >> 18;
+        vx = ((int32_t)(sha_rd32(record + 8) - sha_rd32(record))) >> 18;
+        vy = ((int32_t)(sha_rd32(record + 12) - sha_rd32(record + 4))) >> 18;
+        if (cx < (x0 < x0 + vx ? x0 : x0 + vx) - WALL_RELEASE_RADIUS ||
+            cx > (x0 > x0 + vx ? x0 : x0 + vx) + WALL_RELEASE_RADIUS ||
+            cy < (y0 < y0 + vy ? y0 : y0 + vy) - WALL_RELEASE_RADIUS ||
+            cy > (y0 > y0 + vy ? y0 : y0 + vy) + WALL_RELEASE_RADIUS) continue;
+        length2 = vx * vx + vy * vy;
+        if (length2 <= 0) continue;
+        nearest_wall_point(cx, cy, x0, y0, vx, vy, length2, &qx, &qy);
+        dx = cx - qx; dy = cy - qy;
+        if (dx * dx + dy * dy < WALL_COLLISION_RADIUS * WALL_COLLISION_RADIUS) {
+            int32_t old_qx, old_qy, nx, ny;
+            int64_t normal_motion;
+            uint16_t wall_angle;
+            int16_t reflection;
+
+            /* The previous point identifies the road side. Resolve to that
+             * side rather than merely restoring a possibly-overlapping point. */
+            nearest_wall_point(old_cx, old_cy, x0, y0, vx, vy, length2,
+                               &old_qx, &old_qy);
+            nx = old_cx - old_qx;
+            ny = old_cy - old_qy;
+            if (nx == 0 && ny == 0) {
+                /* If the old centre was exactly on the line, use the side
+                 * opposite the attempted step. This cannot push it through. */
+                nx = -dx; ny = -dy;
+                if (nx == 0 && ny == 0) { nx = -vy; ny = vx; }
+            }
+            normal_motion = (int64_t)(int32_t)(car->x - old_x) * nx +
+                            (int64_t)(int32_t)(car->y - old_y) * ny;
+
+            if (normal_motion >= 0) {
+                /* Already leaving or travelling along the guardrail. Only
+                 * depenetrate; reflecting here is the old wall-sticking bug. */
+                release_from_wall(car, qx, qy, nx, ny);
+                return 0;
+            }
+
+            car->x = old_x; car->y = old_y;
+            if (nx * nx + ny * ny < WALL_RELEASE_RADIUS * WALL_RELEASE_RADIUS)
+                release_from_wall(car, old_qx, old_qy, nx, ny);
+
+            wall_angle = sha_vector_angle(vx, -vy);
+            reflection = (int16_t)(2 * (wall_angle - car->ma));
+            car->ma = (uint16_t)(car->ma + reflection);
+            car->slidspeed = car->v >> 1;
+            car->slidcounter = (int16_t)(10 +
+                muldiv(abs32(car->v >> 14), abs32(reflection), 0x10000));
+            car->slidva = (int16_t)muldiv(reflection >> 4, car->slidspeed,
+                                          1 << 22);
+            car->sliding = 1;
+            car->revo -= car->revo / 50;
+            ++game->collision_count;
+            ++game->wall_collision_count;
+            add_effect(game, SH_FX_SPARK, car->x, car->y, 0x40000,
+                       0, 0, wall_angle, 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void player_tick(SHGame *game, uint16_t pad, int race_started)
+{
+    SHCar *p = &game->player;
+    const uint8_t track = game->selected_track;
     int32_t a, maxva, maxa;
+    uint32_t old_x, old_y;
     const int32_t reference_speed = class_reference_speed(p->car_type);
     int32_t dx, dy;
     int braking = 0;
@@ -240,9 +397,20 @@ static void player_tick(uint8_t track, SHCar *p, uint16_t pad, int race_started)
     p->v = (int32_t)(((int64_t)p->revo * gears[p->gear].ratio) >> 16);
     p->v = muldiv(p->v, p->max_speed, reference_speed);
 
-    /* userctl.c only enables powersliding for cartype 1 (Stock). */
-    if (p->car_type == 1 && p->v > (3 << 19) &&
-        abs32((1 + 2 * braking) * p->va) >= abs32(maxa) - 8) {
+    /* userctl.c gives a crash a short out-of-control phase before normal
+     * traction recovery. This rotates the body toward the reflected movement
+     * and, importantly, leaves steering active so the player can turn away. */
+    if (p->slidcounter > 0) {
+        p->sliding = 1;
+        p->revo -= p->revo >> 6;
+        --p->slidcounter;
+        p->angle = (uint16_t)(p->angle + p->slidva);
+        if (p->slidva > 2) p->slidva -= 2;
+        else if (p->slidva < -2) p->slidva += 2;
+        p->slidspeed -= p->slidspeed >> 7;
+    /* userctl.c only enables driver-initiated powersliding for Stock cars. */
+    } else if (p->car_type == 1 && p->v > (3 << 19) &&
+               abs32((1 + 2 * braking) * p->va) >= abs32(maxa) - 8) {
         p->sliding = 1;
         p->ma = (uint16_t)(p->ma + muldiv(p->va, p->v, 1 << (22 + braking)));
         p->angle = (uint16_t)(p->angle +
@@ -267,14 +435,19 @@ static void player_tick(uint8_t track, SHCar *p, uint16_t pad, int race_started)
 
     dx = mul30(p->slidspeed, sha_cos30(p->ma));
     dy = mul30(p->slidspeed, sha_sin30(p->ma));
-    if (p->v && !p->sliding)
-        p->angle = (uint16_t)(p->angle + muldiv(p->va, p->v, 1 << 22));
+    /* This turn is unconditional in userctl.c, including crash/powerslide
+     * states. Suppressing it while sliding made steering away impossible. */
+    p->angle = (uint16_t)(p->angle + muldiv(p->va, p->v, 1 << 22));
     p->tirerot = (uint16_t)(p->tirerot + p->v / 512);
     p->tiredir = (uint16_t)(-4 * p->va - (p->v ? muldiv(16 * p->va, p->v, 1 << 22) : 0));
-    if (abs32(p->v) > (1 << 9)) p->movangle = vector_angle(dx, -dy);
-    else p->movangle = p->angle;
+    if (p->slidcounter <= 0) {
+        if (abs32(p->v) > (1 << 9)) p->movangle = sha_vector_angle(dx, -dy);
+        else p->movangle = p->angle;
+    }
+    old_x = p->x; old_y = p->y;
     p->x += (uint32_t)dx;
     p->y += (uint32_t)dy;
+    collide_with_wall(game, p, old_x, old_y);
 
     /* racemap.c/userctl.c use palette indices 160..191 as driveable asphalt. */
     {
@@ -282,14 +455,22 @@ static void player_tick(uint8_t track, SHCar *p, uint16_t pad, int race_started)
         if (ground < 160 || ground >= 192) {
             p->revo -= p->revo >> 7;
             p->z = 0x30000;
+            if ((game->race_ticks & 7u) == 0 && abs32(p->v) > (1 << 18))
+                add_effect(game, SH_FX_SMOKE, p->x, p->y, p->z,
+                           dx >> 2, dy >> 2, p->movangle,
+                           ground >= 48 && ground < 80 ? 1 : 0);
         } else p->z = 0x20000;
     }
-    (void)braking;
+    if ((p->sliding || (braking && abs32(p->va) > 120)) &&
+        abs32(p->v) > (2 << 19) && (game->race_ticks & 3u) == 0)
+        add_effect(game, SH_FX_SKID, p->x, p->y, 0x18000,
+                   0, 0, p->movangle, 0);
     update_lap(track, p);
 }
 
-static void ai_tick(uint8_t track, SHCar *car)
+static void ai_tick(SHGame *game, SHCar *car)
 {
+    const uint8_t track = game->selected_track;
     SHPathPoint point;
     int32_t dx, dy, d2;
     int16_t delta;
@@ -298,13 +479,15 @@ static void ai_tick(uint8_t track, SHCar *car)
     car->angle = (uint16_t)(car->angle + muldiv(car->av, car->v, 1 << 22));
     car->x += (uint32_t)mul30(car->v, sha_cos30(car->angle));
     car->y += (uint32_t)mul30(car->v, sha_sin30(car->angle));
+    /* cars.c keeps AI on its PATH and does not run the player's sector-wall
+     * collision pass. Retaining that split saves four full boundary scans. */
     update_lap(track, car);
 
     dx = (int32_t)((car->target_x >> 18) - (car->x >> 18));
     dy = (int32_t)((car->target_y >> 18) - (car->y >> 18));
     d2 = dx * dx + dy * dy;
     if (d2 < (1 << 15) ||
-        (d2 < (1 << 19) && abs32((int16_t)(vector_angle(dx, -dy) - car->angle)) > 0x4000)) {
+        (d2 < (1 << 19) && abs32((int16_t)(sha_vector_angle(dx, -dy) - car->angle)) > 0x4000)) {
         SHTrackAssets assets;
         sha_get_track(track, &assets);
         car->next_point = (uint8_t)((car->next_point + 1) % assets.path_count);
@@ -312,7 +495,7 @@ static void ai_tick(uint8_t track, SHCar *car)
         dx = (int32_t)((car->target_x >> 18) - (car->x >> 18));
         dy = (int32_t)((car->target_y >> 18) - (car->y >> 18));
     }
-    car->to_angle = vector_angle(dx, -dy);
+    car->to_angle = sha_vector_angle(dx, -dy);
     delta = (int16_t)(car->to_angle - car->angle + car->av);
     {
         int32_t s = -sha_sin30((uint16_t)(car->v >> 8));
@@ -337,6 +520,32 @@ static void ai_tick(uint8_t track, SHCar *car)
     {
         uint8_t ground = sh_ground_color(track, car->x, car->y);
         if (ground < 160 || ground >= 192) car->v -= car->v >> 7;
+    }
+}
+
+static void collide_cars(SHGame *game)
+{
+    SHCar *player = &game->player;
+    unsigned i;
+    for (i = 0; i < SH_AI_CARS; ++i) {
+        SHCar *other = &game->ai[i];
+        int32_t dx = ((int32_t)(player->x - other->x)) >> 18;
+        int32_t dy = ((int32_t)(player->y - other->y)) >> 18;
+        if (abs32(dx) > 42 || abs32(dy) > 42 || dx * dx + dy * dy >= 42 * 42)
+            continue;
+        player->x += dx >= 0 ? (2u << 18) : (uint32_t)-(2 << 18);
+        player->y += dy >= 0 ? (2u << 18) : (uint32_t)-(2 << 18);
+        player->revo = (player->revo * 7) >> 3;
+        player->slidspeed = player->v >> 1;
+        player->slidcounter = 12;
+        player->sliding = 1;
+        other->v = (other->v * 7) >> 3;
+        ++game->collision_count;
+        if ((game->race_ticks & 3u) == 0)
+            add_effect(game, SH_FX_SPARK,
+                       player->x / 2u + other->x / 2u,
+                       player->y / 2u + other->y / 2u,
+                       0x40000, 0, 0, player->movangle, 0);
     }
 }
 
@@ -381,9 +590,11 @@ static void simulation_tick(SHGame *game, uint16_t pad)
     if (game->mode == SH_MODE_COUNTDOWN) {
         if (game->countdown) --game->countdown;
         if (game->countdown < 70) {
-            player_tick(game->selected_track, &game->player, pad, 1);
+            player_tick(game, pad, 1);
             for (i = 0; i < SH_AI_CARS; ++i)
-                ai_tick(game->selected_track, &game->ai[i]);
+                ai_tick(game, &game->ai[i]);
+            collide_cars(game);
+            update_effects(game);
         }
         update_camera(game);
         if (!game->countdown) game->mode = SH_MODE_RACE;
@@ -391,9 +602,11 @@ static void simulation_tick(SHGame *game, uint16_t pad)
     }
     if (game->mode != SH_MODE_RACE) return;
     ++game->race_ticks;
-    player_tick(game->selected_track, &game->player, pad, 1);
+    player_tick(game, pad, 1);
     for (i = 0; i < SH_AI_CARS; ++i)
-        ai_tick(game->selected_track, &game->ai[i]);
+        ai_tick(game, &game->ai[i]);
+    collide_cars(game);
+    update_effects(game);
     rank_cars(game);
     update_camera(game);
     if (game->player.finished) game->mode = SH_MODE_FINISHED;
@@ -424,7 +637,7 @@ void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks)
         pressed &= (uint16_t)~menu_mask;
     }
 
-    if (pressed & SH_PAD_X) game->camera = (uint8_t)((game->camera + 1) % 3);
+    if (pressed & SH_PAD_X) game->camera = (uint8_t)((game->camera + 1) & 3u);
     if (pressed & SH_PAD_Y) game->hud ^= 1;
 
     if (game->mode == SH_MODE_TITLE &&

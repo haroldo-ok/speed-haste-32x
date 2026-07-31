@@ -7,6 +7,7 @@
 #include "sh_assets.h"
 #include "platform/platform.h"
 #include "platform/mars.h"
+#include "platform/sh2_math.h"
 #include "sh_render_worker.h"
 
 #define VIEW_Y 12
@@ -23,7 +24,10 @@
 
 static int32_t abs32(int32_t v) { return v < 0 ? -v : v; }
 static int32_t mul30(int32_t a, int32_t b) { return (int32_t)(((int64_t)a * b) >> 30); }
-static int32_t muldiv(int32_t a, int32_t b, int32_t c) { return c ? (int32_t)(((int64_t)a * b) / c) : 0; }
+static inline __attribute__((always_inline)) int32_t muldiv(int32_t a, int32_t b, int32_t c)
+{
+    return c ? sh2_muldiv(a, b, c) : 0;
+}
 
 static void fill(volatile uint8_t *fb, uint8_t color)
 {
@@ -47,14 +51,17 @@ static void rect(volatile uint8_t *fb, int x, int y, int w, int h, uint8_t color
 }
 
 static inline __attribute__((always_inline)) uint8_t floor_pixel(
-    const uint8_t *map, const uint8_t *tiles, uint32_t x, uint32_t y)
+    const uint8_t *map, const uint8_t *tiles, const uint8_t *cached_tiles,
+    uint16_t cached_count, uint32_t x, uint32_t y)
 {
     uint32_t gx = x >> 25, gy = y >> 25;
+    const uint8_t *pixels;
     uint8_t tile;
     if (gx >= 128 || gy >= 128) return 0;
-    tile = map[gy * 128u + gx];
-    return tiles[(uint32_t)tile * 4096u +
-                 (((y >> 19) & 63u) << 6) + ((x >> 19) & 63u)];
+    tile = map[(gy << 7) + gx];
+    pixels = tile < cached_count ? cached_tiles + ((uint32_t)tile << 12) :
+                                  tiles + ((uint32_t)tile << 12);
+    return pixels[(((y >> 19) & 63u) << 6) + ((x >> 19) & 63u)];
 }
 
 typedef struct Camera {
@@ -75,6 +82,35 @@ static void make_camera(const SHGame *game, Camera *cam)
     cam->target_y = p->y;
     cam->angle = game->camera == 1 ? p->angle : game->camera_angle;
     cam->cockpit = 0;
+    if (game->camera == 3 && cam->assets.camera_count) {
+        SHStaticCamera selected = {0, 0, 0};
+        uint32_t best = 0xFFFFFFFFu;
+        unsigned i;
+        for (i = 0; i < cam->assets.camera_count; ++i) {
+            SHStaticCamera candidate;
+            int32_t dx, dy;
+            uint32_t distance;
+            sha_get_camera(cam->track, (uint16_t)i, &candidate);
+            dx = ((int32_t)(p->x - candidate.x)) >> 20;
+            dy = ((int32_t)(p->y - candidate.y)) >> 20;
+            distance = (uint32_t)(dx * dx + dy * dy);
+            if (distance < best) { best = distance; selected = candidate; }
+        }
+        {
+            int32_t dx = ((int32_t)(p->x - selected.x)) >> 20;
+            int32_t dy = ((int32_t)(p->y - selected.y)) >> 20;
+            uint32_t ax = (uint32_t)abs32(dx), ay = (uint32_t)abs32(dy);
+            uint32_t distance = (ax > ay ? ax : ay) + ((ax > ay ? ay : ax) >> 1);
+            cam->x = selected.x;
+            cam->y = selected.y;
+            cam->angle = sha_vector_angle(dx, -dy);
+            cam->radius = 0;
+            cam->height = (int32_t)selected.height;
+            cam->horizon = cam->height / 2000 + 1;
+            cam->focus = 0x0A00 + muldiv(0x1000, (int32_t)distance, 256);
+            return;
+        }
+    }
     if (game->camera == 1) {
         cam->radius = 0;
         cam->height = 1100;
@@ -127,7 +163,11 @@ static void draw_background(volatile uint8_t *fb, const Camera *cam)
 
 static void draw_floor(volatile uint8_t *fb, const Camera *cam)
 {
-    const uint8_t *translation = sha_ptr(SHA_COLOR_MAP_OFF);
+    const uint8_t *translation = sha_color_map();
+    const uint8_t *map = cam->assets.map;
+    const uint8_t *tiles = cam->assets.tiles;
+    const uint8_t *cached_tiles = cam->assets.cached_tiles;
+    const uint16_t cached_count = cam->assets.cached_tile_count;
     const int floor_y = PROJ_Y;
     int row;
     /* The 32X cartridge bus is shared by both SH-2s. Render the floor at
@@ -156,7 +196,7 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
         step_x <<= 2;
         step_y <<= 2;
         for (x = 0; x < 320; x += 4) {
-            uint8_t color = floor_pixel(cam->assets.map, cam->assets.tiles,
+            uint8_t color = floor_pixel(map, tiles, cached_tiles, cached_count,
                                         (uint32_t)pos_x, (uint32_t)pos_y);
             uint8_t shaded = translation[(31 - level) * 256 + color];
             volatile uint32_t *p0 = (volatile uint32_t *)(fb + (floor_y + row) * 320 + x);
@@ -188,6 +228,8 @@ void sh_render_slave_floor(const volatile SHFloorJob *job)
     /* Use the exact pointers submitted by the master; both are cartridge ROM. */
     cam.assets.map = job->map;
     cam.assets.tiles = job->tiles;
+    cam.assets.cached_tiles = job->cached_tiles;
+    cam.assets.cached_tile_count = job->cached_tile_count;
     draw_floor(job->framebuffer, &cam);
 }
 
@@ -199,6 +241,8 @@ static void start_slave_floor(volatile uint8_t *fb, const Camera *cam)
     job->framebuffer = fb;
     job->map = cam->assets.map;
     job->tiles = cam->assets.tiles;
+    job->cached_tiles = cam->assets.cached_tiles;
+    job->cached_tile_count = (uint8_t)cam->assets.cached_tile_count;
     job->camera_x = cam->x;
     job->camera_y = cam->y;
     job->angle = cam->angle;
@@ -480,12 +524,14 @@ static void draw_obstacles(volatile uint8_t *fb, const Camera *cam)
     VisibleSprite visible[MAX_VISIBLE];
     int count = 0;
     int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
+    const uint8_t *record = cam->assets.obstacles;
     unsigned i;
-    for (i = 0; i < cam->assets.obstacle_count; ++i) {
+    for (i = 0; i < cam->assets.obstacle_count; ++i, record += 12) {
         SHObstacle ob; SHSprite sp;
         int32_t relx, rely, depth, side;
         int x, y, w, h;
-        sha_get_obstacle(cam->track, i, &ob);
+        ob.x = sha_rd32(record); ob.y = sha_rd32(record + 4);
+        ob.angle = sha_rd16(record + 8); ob.sprite = sha_rd16(record + 10);
         relx = (int32_t)(ob.x - cam->x) >> 6;
         rely = (int32_t)(ob.y - cam->y) >> 6;
         /* Reject most of the 263 decorations before any fixed-point multiplies. */
@@ -517,18 +563,75 @@ static void draw_obstacles(volatile uint8_t *fb, const Camera *cam)
     }
 }
 
+static void draw_effects(volatile uint8_t *fb, const Camera *cam, const SHGame *game)
+{
+    static const uint16_t spark_frames[6] = {
+        SHSPR_SPRK01AA_IS2, SHSPR_SPRK02AA_IS2, SHSPR_SPRK03AA_IS2,
+        SHSPR_SPRK04AA_IS2, SHSPR_SPRK05AA_IS2, SHSPR_SPRK06AA_IS2
+    };
+    static const uint16_t smoke_frames[3][6] = {
+        {SHSPR_GND001AA_IS2, SHSPR_GND002AA_IS2, SHSPR_GND003AA_IS2,
+         SHSPR_GND004AA_IS2, SHSPR_GND005AA_IS2, SHSPR_GND006AA_IS2},
+        {SHSPR_GND101AA_IS2, SHSPR_GND102AA_IS2, SHSPR_GND103AA_IS2,
+         SHSPR_GND104AA_IS2, SHSPR_GND105AA_IS2, SHSPR_GND106AA_IS2},
+        {SHSPR_GND201AA_IS2, SHSPR_GND202AA_IS2, SHSPR_GND203AA_IS2,
+         SHSPR_GND204AA_IS2, SHSPR_GND205AA_IS2, SHSPR_GND206AA_IS2}
+    };
+    int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
+    unsigned i;
+    for (i = 0; i < SH_EFFECTS; ++i) {
+        const SHEffect *effect = &game->effects[i];
+        int32_t relx, rely, depth, side;
+        int x, y;
+        if (effect->type == SH_FX_NONE) continue;
+        relx = ((int32_t)(effect->x - cam->x)) >> 6;
+        rely = ((int32_t)(effect->y - cam->y)) >> 6;
+        depth = mul30(relx, ca) + mul30(rely, sa);
+        if (depth < (4 << 14) || depth > (20 << 20)) continue;
+        side = mul30(rely, ca) - mul30(relx, sa);
+        if (abs32(side / 2) > depth) continue;
+        x = CX + muldiv(side >> 4, cam->focus, depth);
+        y = PROJ_Y + muldiv((cam->height << 2) - ((int32_t)effect->z >> 10),
+                            cam->focus, depth) - cam->horizon;
+        if (effect->type == SH_FX_SKID) {
+            int size = muldiv(5000, cam->focus, depth);
+            if (size < 1) size = 1;
+            if (size > 6) size = 6;
+            rect(fb, x - size / 2, y - 1, size, 2, 30);
+        } else {
+            SHSprite sprite;
+            unsigned frame = (unsigned)effect->age * 6u / effect->life;
+            uint16_t id;
+            int w, h;
+            if (frame > 5) frame = 5;
+            id = effect->type == SH_FX_SPARK ? spark_frames[frame] :
+                 smoke_frames[effect->variant % 3u][frame];
+            sha_get_sprite(id, &sprite);
+            w = muldiv((int32_t)sprite.world_width, cam->focus, depth);
+            h = muldiv((int32_t)sprite.world_height, cam->focus, depth);
+            if (w > 0 && h > 0 && w < 80 && h < 80)
+                draw_sprite_scaled(fb, &sprite, x, y, w, h, 0);
+        }
+    }
+}
+
 static void draw_walls(volatile uint8_t *fb, const Camera *cam)
 {
     int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
+    const uint8_t *record = cam->assets.walls;
     unsigned i;
-    for (i = 0; i < cam->assets.wall_count; ++i) {
+    for (i = 0; i < cam->assets.wall_count; ++i, record += 20) {
         SHWall wall; SHSprite tex;
         uint32_t wx0, wy0, wx1, wy1;
         int32_t x0, y0, x1, y1, rx0, rz0, rx1, rz1;
         int px0, px1, bottom0, bottom1, top0, top1, x;
-        sha_get_wall(cam->track, i, &wall); sha_get_sprite(wall.texture, &tex);
-        wx0 = (wall.x0 << 15) + (1u << 30); wy0 = (wall.y0 << 15) + (1u << 30);
-        wx1 = (wall.x1 << 15) + (1u << 30); wy1 = (wall.y1 << 15) + (1u << 30);
+        wall.x0 = sha_rd32(record); wall.y0 = sha_rd32(record + 4);
+        wall.x1 = sha_rd32(record + 8); wall.y1 = sha_rd32(record + 12);
+        wall.texture = sha_rd16(record + 16); wall.flags = sha_rd16(record + 18);
+        sha_get_sprite(wall.texture, &tex);
+        /* Importer already applied SEC_TOMAP; keep shifts/adds out of this loop. */
+        wx0 = wall.x0; wy0 = wall.y0;
+        wx1 = wall.x1; wy1 = wall.y1;
         x0 = (int32_t)(wx0 - cam->x) >> 6; y0 = (int32_t)(wy0 - cam->y) >> 6;
         x1 = (int32_t)(wx1 - cam->x) >> 6; y1 = (int32_t)(wy1 - cam->y) >> 6;
         rz0 = mul30(x0, ca) + mul30(y0, sa);
@@ -549,28 +652,55 @@ static void draw_walls(volatile uint8_t *fb, const Camera *cam)
         top0 = PROJ_Y - cam->horizon + muldiv((cam->height << 2) - ((int)tex.height << 8), cam->focus, rz0);
         top1 = PROJ_Y - cam->horizon + muldiv((cam->height << 2) - ((int)tex.height << 8), cam->focus, rz1);
         if (px0 > px1) { int t; t=px0;px0=px1;px1=t; t=bottom0;bottom0=bottom1;bottom1=t; t=top0;top0=top1;top1=t; }
-        /* Low wall detail mirrors the DOS WallsDetail=0 performance mode. */
-        for (x = px0 < 0 ? 0 : px0; x <= px1 && x < 320; x += 2) {
-            int den = px1 - px0; int t = den ? (x - px0) * 65536 / den : 0;
-            int top = top0 + (top1-top0) * t / 65536;
-            int bottom = bottom0 + (bottom1-bottom0) * t / 65536;
-            int tx = ((x - px0) * tex.width / (den ? den : 1)) % tex.width;
-            int unclipped_top = top, span = bottom - top + 1;
-            uint32_t tyfp, tystep;
-            int y;
-            if (span <= 0) continue;
-            tystep = ((uint32_t)tex.height << 16) / (uint32_t)span;
-            if (top < VIEW_Y) top = VIEW_Y;
-            if (bottom >= VIEW_Y + VIEW_H) bottom = VIEW_Y + VIEW_H - 1;
-            tyfp = (uint32_t)(top - unclipped_top) * tystep;
-            for (y = top; y <= bottom; ++y, tyfp += tystep) {
-                int ty = (int)(tyfp >> 16);
-                uint8_t c;
-                if (ty >= tex.height) ty = tex.height - 1;
-                c = tex.pixels[ty * tex.width + tx];
-                if (c) {
-                    fb[y * 320 + x] = c;
-                    if (x + 1 < 320) fb[y * 320 + x + 1] = c;
+        /* DDA all horizontal interpolation: no division remains in the X loop. */
+        {
+            int den = px1 - px0;
+            int xstart = px0 < 0 ? 0 : px0;
+            int xend = px1 >= 320 ? 319 : px1;
+            int32_t top_step, bottom_step, tx_step;
+            int32_t top_fp, bottom_fp, tx_fp;
+            if (den <= 0 || xstart > xend) continue;
+            top_step = muldiv(top1 - top0, 65536, den);
+            bottom_step = muldiv(bottom1 - bottom0, 65536, den);
+            tx_step = muldiv(tex.width, 65536, den);
+            top_fp = (top0 << 16) + (xstart - px0) * top_step;
+            bottom_fp = (bottom0 << 16) + (xstart - px0) * bottom_step;
+            tx_fp = (xstart - px0) * tx_step;
+            top_step <<= 1; bottom_step <<= 1; tx_step <<= 1;
+
+            /* Low wall detail mirrors WallsDetail=0 and writes 2x2 quads. */
+            for (x = xstart; x <= xend; x += 2,
+                 top_fp += top_step, bottom_fp += bottom_step, tx_fp += tx_step) {
+                int top = top_fp >> 16;
+                int bottom = bottom_fp >> 16;
+                int tx = tx_fp >> 16;
+                int unclipped_top;
+                int span;
+                if (tx >= tex.width) tx -= tex.width;
+                unclipped_top = top;
+                span = bottom - top + 1;
+                /* all values below are incremental or bit-shifted */
+                uint32_t tyfp, tystep;
+                int y;
+                if (span <= 0) continue;
+                tystep = (uint32_t)sh2_idiv((int32_t)tex.height << 16, span);
+                if (top < VIEW_Y) top = VIEW_Y;
+                if (bottom >= VIEW_Y + VIEW_H) bottom = VIEW_Y + VIEW_H - 1;
+                tyfp = (uint32_t)(top - unclipped_top) * tystep;
+                tystep <<= 1;
+                for (y = top; y <= bottom; y += 2, tyfp += tystep) {
+                    int ty = (int)(tyfp >> 16);
+                    uint8_t c;
+                    if (ty >= tex.height) ty = tex.height - 1;
+                    c = tex.pixels[ty * tex.width + tx];
+                    if (c) {
+                        fb[y * 320 + x] = c;
+                        if (x + 1 < 320) fb[y * 320 + x + 1] = c;
+                        if (y + 1 <= bottom) {
+                            fb[(y + 1) * 320 + x] = c;
+                            if (x + 1 < 320) fb[(y + 1) * 320 + x + 1] = c;
+                        }
+                    }
                 }
             }
         }
@@ -595,7 +725,9 @@ static void draw_minimap(volatile uint8_t *fb, const Camera *cam, const SHCar *p
             for (x = -32; x < 32; x += 2) {
                 uint32_t wx = p->x + (uint32_t)(mul30(x << 22, ca) - mul30(y << 22, sa));
                 uint32_t wy = p->y + (uint32_t)(mul30(x << 22, sa) + mul30(y << 22, ca));
-                uint8_t c = floor_pixel(cam->assets.map, cam->assets.tiles, wx, wy);
+                uint8_t c = floor_pixel(cam->assets.map, cam->assets.tiles,
+                                        cam->assets.cached_tiles,
+                                        cam->assets.cached_tile_count, wx, wy);
                 int dx = 32 + x, dy = 32 + y;
                 cache[dy * 64 + dx] = cache[dy * 64 + dx + 1] = c;
                 cache[(dy + 1) * 64 + dx] = cache[(dy + 1) * 64 + dx + 1] = c;
@@ -663,6 +795,7 @@ static void render_race(volatile uint8_t *fb, const SHGame *game)
 #ifndef SH_NO_OBSTACLES
     draw_obstacles(fb,&cam);
 #endif
+    draw_effects(fb, &cam, game);
 #ifndef SH_NO_MODELS
     draw_race_cars(fb, &cam, game);
 #endif
@@ -771,7 +904,12 @@ void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
         rect(fb, 0, VIEW_Y + VIEW_H, 320, 224 - VIEW_Y - VIEW_H, 0);
         render_race(fb,game);
     }
-    /* Three overscan pixels expose camera-lag, state and heartbeat to tests. */
+    /* Overscan probes expose wall/general collisions, world movement, camera,
+     * state and heartbeat to the PicoDrive point-to-point test. */
+    fb[223 * 320 + 313] = game->wall_collision_count ? 96 : 0;
+    fb[223 * 320 + 314] = (uint8_t)(224 + ((game->player.x >> 20) & 15u));
+    fb[223 * 320 + 315] = (uint8_t)(224 + ((game->player.y >> 20) & 15u));
+    fb[223 * 320 + 316] = game->collision_count ? 96 : 0;
     fb[223 * 320 + 317] =
         abs32((int16_t)(game->player.movangle - game->camera_angle)) >= 32 ? 96 : 0;
     fb[223 * 320 + 318] = (uint8_t)(game->mode == SH_MODE_MENU ?
