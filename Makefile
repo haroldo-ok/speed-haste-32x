@@ -35,7 +35,9 @@ C_SOURCES := src/main.c src/sh_assets.c src/sh_game.c src/sh_render.c \
 ASSET_BIN := assets/generated/speed_haste_assets.bin
 ASSET_OBJ := $(BUILD)/assets/speed_haste_assets.o
 # The ROM/security header in sh2_crt0.o must be the first linked .text input.
-OBJECTS := $(BUILD)/src/platform/sh2_crt0.o $(patsubst %.c,$(BUILD)/%.o,$(C_SOURCES)) $(ASSET_OBJ)
+OBJECTS := $(BUILD)/src/platform/sh2_crt0.o \
+           $(BUILD)/src/platform/sh2_math.o \
+           $(patsubst %.c,$(BUILD)/%.o,$(C_SOURCES)) $(ASSET_OBJ)
 
 .PHONY: all rom clean test test-unit test-static test-emulator check-toolchain
 all: rom
@@ -72,6 +74,10 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(@D)
 	$(SHCC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/%.o: %.s
+	@mkdir -p $(@D)
+	$(SHAS) $(ASFLAGS) -o $@ $<
+
 $(ASSET_OBJ): $(ASSET_BIN)
 	@mkdir -p $(@D)
 	$(SHOBJC) -I binary -O elf32-sh -B sh \
@@ -90,6 +96,8 @@ $(TARGET).32x: $(TARGET).elf
 test-unit:
 	python3 tests/test_assets.py
 	python3 tests/test_projection.py
+	python3 tests/test_collision.py
+	python3 tests/test_optimization.py
 
 test-static: rom
 	python3 tests/test_rom_static.py $(TARGET).32x

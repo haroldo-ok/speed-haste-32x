@@ -1,42 +1,47 @@
-Speed Haste 32X — forward-flow/camera correction revision
-========================================================
+Speed Haste 32X — wall-release and crash-recovery correction
+============================================================
 ROM: SpeedHaste32X.32x
 Size: 2,621,440 bytes (2.5 MiB)
-SHA-256: 913a419cd1f6e64a6d760172dc200a483ed57099efe4cc52b4230771458f36d0
-Genesis checksum: 0xB9A8
+SHA-256: bf9b16ec2ea9ec50c4f1a8bc5d3f4c6f12e94de42feee95aa544fc9cda9f1cfe
+Genesis checksum: 0x25A9
 MARS master entry: 0x06000240
 MARS slave entry: 0x06000244
 
 Toolchain: 32XDK 20220418 / GCC 12.1.0
 Emulator: PicoDrive libretro 78a662e3135871a6c657d5e61900f6704152e594
 
-Direction/camera corrections
-- Heading reconstruction now matches every original GetAngle(dx, -dy) call
-- Player movement angle no longer mirrors after steering
-- AI target headings and PATH/lap checks use the same inverted-Y convention
-- A fixed scene point now approaches/down-projects during forward movement
-- Chase/high camera retains original delta/16 angular lag
-- Chase camera position remains target - radius*forward (behind the car)
-- Directional cars retain flsprs.c's 0x8000 rear-view model rotation
+Wall-collision correction
+- Previous centre now identifies the valid road side of each source wall
+- An embedded rollback point is depenetrated to a 36-unit release radius
+- Four-unit contact hysteresis prevents immediate reflection into the same wall
+- Outward and wall-tangential movement releases without another bounce
+- Original userctl.c slidcounter crash rotation and decay are active
+- Body steering remains active during crash recovery and powerslides
+- Integer square-root normalisation runs only after an actual narrow-phase hit
 
-Perspective corrections retained
-- Floor, walls, objects and cars share RenderView's hsk+y projection origin
-- IS2 objects use authored dx/dy hotspots
+Source-backed collision/effect systems retained
+- 76 MAP00 and 123 MAP01 source-derived collision wall sides
+- Wall-angle reflection, RPM loss, car-to-car separation and 7/8 momentum response
+- Original six-frame sparks, three ground-smoke families and persistent skid marks
 
-Original content
-- MAP00 Racer's Edge and MAP01 The City
-- Formula One and Stock; 12 original I3D cars
-- Both panoramas, cockpits, tachometers and setup menus
+D32XR-inspired optimization retained
+- SH7604 hardware 32/32 and 64/32 divider helpers
+- Frequency-sorted 28-tile aligned SDRAM cache
+- Cache coverage: Racer's Edge 95%, The City 92%
+- Cached map, panorama, mountain and 8 KiB shade table
+- Build-time SEC_TOMAP conversion
+- Wall DDA steps outside X loops; 2x2 low-detail writes
+- Master/slave SH-2 rendering; independent 70 Hz simulation
 
 Verification: PASS
-- 16-heading inverted-Y reconstruction test
-- Forward scene-flow depth/screen projection test
-- Floor/object identity at eight depths
-- IS2 hotspot, model orientation and camera smoothing tests
-- Static ROM/MARS/checksum and two-map content tests
-- PicoDrive The City + Stock E2E and black-screen tests
-- The City/Stock: 100 frames / 600 VBlanks = 10.0 fps
-- Acceleration changed 99,053 RGB bytes
-- Steering changed 152,182 RGB bytes
+- Content, projection/forward-flow, collision, optimization and ROM tests
+- PicoDrive The City + Stock point-to-point E2E
+- Dedicated source-wall hit followed by opposite-steering escape
+- 53 encoded world-position changes while driving away
+- Impact-to-recovery framebuffer delta: 149,535 RGB bytes
+- Black/frozen-screen checks at 16 capture points
+- 120 frames / 600 VBlanks = 12.0 fps
+- Acceleration changed 103,292 RGB bytes
+- Steering/collision changed 143,632 RGB bytes
 
 Detailed report: ../test-results/emulator/report.json

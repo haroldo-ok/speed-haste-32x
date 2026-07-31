@@ -6,6 +6,21 @@
 #define SH_AI_CARS 4
 #define SH_RACERS (SH_AI_CARS + 1)
 #define SH_LAPS 3
+#define SH_EFFECTS 16
+
+enum {
+    SH_FX_NONE,
+    SH_FX_SPARK,
+    SH_FX_SMOKE,
+    SH_FX_SKID
+};
+
+typedef struct SHEffect {
+    uint32_t x, y, z;
+    int32_t dx, dy;
+    uint16_t age, life, angle;
+    uint8_t type, variant;
+} SHEffect;
 
 enum {
     SH_MODE_TITLE,
@@ -67,10 +82,13 @@ typedef struct SHGame {
     uint16_t camera_angle;
     uint16_t countdown;
     uint16_t sim_accumulator;
+    uint16_t collision_count;
+    uint16_t wall_collision_count;
     uint32_t frame;
     uint32_t race_ticks;
     SHCar player;
     SHCar ai[SH_AI_CARS];
+    SHEffect effects[SH_EFFECTS];
 } SHGame;
 
 void sh_game_init(SHGame *game);

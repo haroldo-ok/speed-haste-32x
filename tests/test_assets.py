@@ -18,19 +18,26 @@ def constant(name: str) -> int:
 assert blob[:8] == b"SH32DATA"
 assert constant("SHA_TRACK_COUNT") == 2
 expected = (
-    (0, 115, 88, 20, 86, 263, "Racer's Edge"),
-    (1, 190, 186, 20, 123, 325, "The City"),
+    (0, 115, 88, 20, 11, 86, 76, 263, "Racer's Edge"),
+    (1, 190, 186, 20, 36, 123, 123, 325, "The City"),
 )
-for track, tiles, path, starts, walls, objects, title in expected:
+for track, tiles, path, starts, cameras, walls, collision_walls, objects, title in expected:
     assert constant(f"SHA_MAP{track}_TILE_COUNT") == tiles
     assert constant(f"SHA_MAP{track}_PATH_COUNT") == path
     assert constant(f"SHA_MAP{track}_START_COUNT") == starts
+    assert constant(f"SHA_MAP{track}_CAMERA_COUNT") == cameras
     assert constant(f"SHA_MAP{track}_WALL_COUNT") == walls
+    assert constant(f"SHA_MAP{track}_COLLISION_WALL_COUNT") == collision_walls
     assert constant(f"SHA_MAP{track}_OBSTACLE_COUNT") == objects
     assert title in manifest
 
-assert constant("SHA_SPRITE_COUNT") >= 110
+assert constant("SHA_SPRITE_COUNT") >= 130
+assert constant("SHA_TILE_CACHE_COUNT") == 28
 assert len(blob) > 2_400_000
+for effect in ("SHSPR_SPRK01AA_IS2", "SHSPR_SPRK06AA_IS2",
+               "SHSPR_GND001AA_IS2", "SHSPR_GND106AA_IS2",
+               "SHSPR_GND206AA_IS2"):
+    assert effect in header
 for required in (
     "SHA_COCKPIT0_OFF", "SHA_COCKPIT1_OFF", "SHA_MENU_MAIN_OFF",
     "SHA_MENU_CIRCUIT_OFF", "SHA_MENU_CAR_OFF", "SHA_CAR_SPRITES_OFF",

@@ -28,7 +28,7 @@ The platform startup assembly and linker layout were adapted from this 32X suppo
 - Repository: <https://github.com/viciious/d32xr>
 - Revision reviewed: `95f5e05ca4f5f50f9f158440d05317db425dd2c4`
 
-D32XR was used as a hardware/toolchain reference for current GCC flags, framebuffer access, master/slave synchronization and PicoDrive-compatible startup. No Doom game or content code is included.
+D32XR was used as a hardware/toolchain reference for current GCC flags, framebuffer access, master/slave synchronization, cache-through SDRAM strategy, and SH7604 divider access. `src/platform/sh2_math.s` follows D32XR's MIT-licensed hardware-divider pattern. No Doom game or content code is included.
 
 ## 32XDK
 

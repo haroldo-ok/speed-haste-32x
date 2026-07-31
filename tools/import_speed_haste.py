@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import argparse
+from collections import Counter
 import math
 import shlex
 import struct
@@ -153,17 +154,20 @@ def parse_map(jcl: JCL, number: int):
     data = jcl.get(f"MAP{number:02}.DAT")
     tile_numbers = struct.unpack_from("<4096H", data, 4)
     rotations = data[4 + 8192:4 + 8192 + 4096]
-    combinations: dict[tuple[int, int], int] = {}
+    # Put the most frequently referenced tiles first. The 32X runtime copies
+    # this prefix to SDRAM, following D32XR's texture-cache approach while
+    # retaining one-byte map indices in the floor inner loop.
+    keys = [(tile_number, rotations[index] & 3)
+            for index, tile_number in enumerate(tile_numbers)]
+    frequency = Counter(keys)
+    ordered = sorted(frequency, key=lambda key: (-frequency[key], key[0], key[1]))
+    combinations = {key: index for index, key in enumerate(ordered)}
     atlas = bytearray()
-    map64 = bytearray(4096)
     grafs = jcl.get("GRAFS.DAT")
-    for index, tile_number in enumerate(tile_numbers):
-        key = (tile_number, rotations[index] & 3)
-        if key not in combinations:
-            combinations[key] = len(combinations)
-            source = grafs[tile_number * 4096:(tile_number + 1) * 4096]
-            atlas.extend(rotate_tile(source, key[1]))
-        map64[index] = combinations[key]
+    for tile_number, rotation in ordered:
+        source = grafs[tile_number * 4096:(tile_number + 1) * 4096]
+        atlas.extend(rotate_tile(source, rotation))
+    map64 = bytearray(combinations[key] for key in keys)
 
     map128 = bytearray(128 * 128)
     for gy in range(32, 96):
@@ -175,7 +179,8 @@ def parse_map(jcl: JCL, number: int):
     for offset in range(12292, len(data) - 7, 8):
         x, y, angle, kind = struct.unpack_from("<HHHH", data, offset)
         things.append((x, y, angle, kind))
-    return bytes(map128), bytes(atlas), combinations, things
+    cache_coverage = sum(frequency[key] for key in ordered[:28])
+    return bytes(map128), bytes(atlas), combinations, things, cache_coverage
 
 
 def parse_path(jcl: JCL, number: int = 0) -> bytes:
@@ -203,23 +208,41 @@ def parse_sectors(jcl: JCL, number: int, sprite_id: dict[str, int]):
     if lines[cursor].lower() != "sectors":
         raise ValueError("malformed SEC file")
     cursor += 1
-    walls = []
+    sectors = []
     for _ in range(sector_count):
-        side_count, _flags = (int(v, 0) for v in lines[cursor].split())
+        side_count, flags = (int(v, 0) for v in lines[cursor].split())
         cursor += 1
+        sides = []
         for _ in range(side_count):
             fields = shlex.split(lines[cursor])
             cursor += 1
-            v0, v1 = int(fields[0], 0), int(fields[1], 0)
-            texture = fields[2]
-            if texture:
-                x0, y0 = vertices[v0]
-                x1, y1 = vertices[v1]
-                walls.append((x0, y0, x1, y1, sprite_id[texture.upper() + ".IS2"]))
+            sides.append((int(fields[0], 0), int(fields[1], 0),
+                          fields[2], int(fields[3], 0)))
+        sectors.append((flags, sides))
+
+    walls = []
+    collision_count = 0
+    for flags, sides in sectors:
+        for v0, v1, texture, other in sides:
+            if not texture:
+                continue
+            other_flags = sectors[other][0] if 0 <= other < len(sectors) else 0
+            collision = int(bool(flags) != bool(other_flags))
+            collision_count += collision
+            x0, y0 = vertices[v0]
+            x1, y1 = vertices[v1]
+            # SEC_TOMAP: convert once at build time, outside all render/physics loops.
+            wx0 = ((x0 << 15) + (1 << 30)) & 0xFFFFFFFF
+            wy0 = ((y0 << 15) + (1 << 30)) & 0xFFFFFFFF
+            wx1 = ((x1 << 15) + (1 << 30)) & 0xFFFFFFFF
+            wy1 = ((y1 << 15) + (1 << 30)) & 0xFFFFFFFF
+            walls.append((wx0, wy0, wx1, wy1,
+                          sprite_id[texture.upper() + ".IS2"], collision))
     payload = bytearray()
-    for x0, y0, x1, y1, texture in walls:
-        payload += u32(x0) + u32(y0) + u32(x1) + u32(y1) + u16(texture) + u16(0)
-    return bytes(payload), len(walls)
+    for x0, y0, x1, y1, texture, collision in walls:
+        payload += u32(x0) + u32(y0) + u32(x1) + u32(y1)
+        payload += u16(texture) + u16(collision)
+    return bytes(payload), len(walls), collision_count
 
 
 def parse_i3d(data: bytes):
@@ -357,16 +380,23 @@ def main() -> int:
     track_names = ("Racer's Edge", "The City")
     tracks = []
     for number in range(2):
-        map_data, tile_atlas, combinations, things = parse_map(jcl, number)
+        map_data, tile_atlas, combinations, things, cache_coverage = parse_map(jcl, number)
         path = parse_path(jcl, number)
         starts = bytearray()
+        cameras = bytearray()
         for x, y, angle, kind in things:
             if kind >> 8 == 241:
                 starts += u16(x) + u16(y) + u16((0x4000 - angle) & 0xFFFF) + u16(0)
+            elif kind >> 8 == 242:
+                wx = ((x << 19) + (1 << 30)) & 0xFFFFFFFF
+                wy = ((y << 19) + (1 << 30)) & 0xFFFFFFFF
+                height = 900 + (kind & 0xFF) * 500
+                cameras += u32(wx) + u32(wy) + u32(height)
         tracks.append({
             "number": number, "map": map_data, "tiles": tile_atlas,
             "combinations": combinations, "things": things,
-            "path": path, "starts": bytes(starts), "obstacles": [],
+            "path": path, "starts": bytes(starts), "cameras": bytes(cameras),
+            "obstacles": [], "cache_coverage": cache_coverage,
         })
         blob.add(f"MAP{number}_MAP128", map_data, 4)
         blob.add(f"MAP{number}_TILES", tile_atlas, 4)
@@ -374,6 +404,7 @@ def main() -> int:
         blob.add(f"MAP{number}_MOUNTAINS", jcl.get(f"MOUNT{number}.PIX"), 4)
         blob.add(f"MAP{number}_PATH", path, 4)
         blob.add(f"MAP{number}_STARTS", starts, 4)
+        blob.add(f"MAP{number}_CAMERAS", cameras, 4)
 
     blob.add("COCKPIT0", jcl.get("SALP0.PIX"), 4)
     blob.add("COCKPIT1", jcl.get("SALP1.PIX"), 4)
@@ -404,6 +435,10 @@ def main() -> int:
     for prefix in ("MFBG", "MFBW", "MFMG", "MFMW", "MFLW", "MFLG", "MG"):
         for digit in range(10):
             hud_names.append(f"{prefix}{digit}.IS2")
+    for frame in range(1, 7):
+        hud_names.append(f"SPRK{frame:02}AA.IS2")
+        for ground in range(3):
+            hud_names.append(f"GND{ground}{frame:02}AA.IS2")
 
     obstacle_names = set()
     for track in tracks:
@@ -433,8 +468,9 @@ def main() -> int:
 
     for track in tracks:
         number = track["number"]
-        walls, wall_count = parse_sectors(jcl, number, sprite_id)
+        walls, wall_count, collision_count = parse_sectors(jcl, number, sprite_id)
         track["wall_count"] = wall_count
+        track["collision_count"] = collision_count
         blob.add(f"MAP{number}_WALLS", walls, 4)
         obstacles = bytearray()
         for x, y, angle, name in track["obstacles"]:
@@ -478,15 +514,24 @@ def main() -> int:
         header.append(f"#define SHA_{name}_OFF {offset}u")
     header += [
         "#define SHA_TRACK_COUNT 2u",
+        "#define SHA_TILE_CACHE_COUNT 28u",
+        f"#define SHA_MAP0_SKY_SIZE {len(jcl.get('NUBES0.PIX'))}u",
+        f"#define SHA_MAP0_MOUNTAINS_SIZE {len(jcl.get('MOUNT0.PIX'))}u",
+        f"#define SHA_MAP1_SKY_SIZE {len(jcl.get('NUBES1.PIX'))}u",
+        f"#define SHA_MAP1_MOUNTAINS_SIZE {len(jcl.get('MOUNT1.PIX'))}u",
         f"#define SHA_MAP0_TILE_COUNT {len(tracks[0]['combinations'])}u",
         f"#define SHA_MAP0_PATH_COUNT {len(tracks[0]['path']) // 16}u",
         f"#define SHA_MAP0_START_COUNT {len(tracks[0]['starts']) // 8}u",
+        f"#define SHA_MAP0_CAMERA_COUNT {len(tracks[0]['cameras']) // 12}u",
         f"#define SHA_MAP0_WALL_COUNT {tracks[0]['wall_count']}u",
+        f"#define SHA_MAP0_COLLISION_WALL_COUNT {tracks[0]['collision_count']}u",
         f"#define SHA_MAP0_OBSTACLE_COUNT {len(tracks[0]['obstacles'])}u",
         f"#define SHA_MAP1_TILE_COUNT {len(tracks[1]['combinations'])}u",
         f"#define SHA_MAP1_PATH_COUNT {len(tracks[1]['path']) // 16}u",
         f"#define SHA_MAP1_START_COUNT {len(tracks[1]['starts']) // 8}u",
+        f"#define SHA_MAP1_CAMERA_COUNT {len(tracks[1]['cameras']) // 12}u",
         f"#define SHA_MAP1_WALL_COUNT {tracks[1]['wall_count']}u",
+        f"#define SHA_MAP1_COLLISION_WALL_COUNT {tracks[1]['collision_count']}u",
         f"#define SHA_MAP1_OBSTACLE_COUNT {len(tracks[1]['obstacles'])}u",
         f"#define SHA_SPRITE_COUNT {len(sprite_names)}u",
         "enum SHSpriteId {",
@@ -500,10 +545,14 @@ def main() -> int:
         "Tracks: 2 shareware circuits\n"
         f"MAP00 {track_names[0]}: tiles={len(tracks[0]['combinations'])}, "
         f"path={len(tracks[0]['path'])//16}, starts={len(tracks[0]['starts'])//8}, "
-        f"walls={tracks[0]['wall_count']}, objects={len(tracks[0]['obstacles'])}\n"
+        f"cameras={len(tracks[0]['cameras'])//12}, walls={tracks[0]['wall_count']}, "
+        f"collision-walls={tracks[0]['collision_count']}, objects={len(tracks[0]['obstacles'])}, "
+        f"cached-map-coverage={tracks[0]['cache_coverage'] * 100 // 4096}%\n"
         f"MAP01 {track_names[1]}: tiles={len(tracks[1]['combinations'])}, "
         f"path={len(tracks[1]['path'])//16}, starts={len(tracks[1]['starts'])//8}, "
-        f"walls={tracks[1]['wall_count']}, objects={len(tracks[1]['obstacles'])}\n"
+        f"cameras={len(tracks[1]['cameras'])//12}, walls={tracks[1]['wall_count']}, "
+        f"collision-walls={tracks[1]['collision_count']}, objects={len(tracks[1]['obstacles'])}, "
+        f"cached-map-coverage={tracks[1]['cache_coverage'] * 100 // 4096}%\n"
         f"Sprites: {len(sprite_names)}\nCar classes: 2 x 6 I3D models x 16 views\n"
         f"Blob bytes: {len(blob.data)}\n"
     )

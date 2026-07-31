@@ -15,6 +15,19 @@ PAD_START = 3
 PAD_LEFT = 6
 PAD_RIGHT = 7
 PAD_C = 8  # RetroPad A maps to Genesis C in PicoDrive
+PAD_X = 10 # RetroPad L maps to Genesis X
+
+
+def wall_collision_probe(emu: LibretroHarness) -> tuple[int, int, int]:
+    return emu.pixel(313, 223)
+
+
+def position_probe(emu: LibretroHarness) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    return emu.pixel(314, 223), emu.pixel(315, 223)
+
+
+def collision_probe(emu: LibretroHarness) -> tuple[int, int, int]:
+    return emu.pixel(316, 223)
 
 
 def probe(emu: LibretroHarness) -> tuple[int, int, int]:
@@ -85,7 +98,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     report: dict[str, object] = {
         "core": str(args.core.resolve()), "rom": str(args.rom.resolve()),
-        "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> controls -> pause -> finish",
+        "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> wall impact -> recovery -> pause -> finish",
     }
 
     with LibretroHarness(args.core, args.rom) as emu:
@@ -122,6 +135,13 @@ def main() -> int:
         race_probe = probe(emu)
         race = capture(emu, args.out, "10_city_stock_race", report)
 
+        # Cycle chase -> cockpit -> high -> original MAP01 trackside TV camera.
+        for _ in range(3):
+            press_selection(emu, PAD_X)
+        television = capture(emu, args.out, "10b_city_tv_camera", report)
+        assert television != race, "static MAP camera did not change the view"
+        press_selection(emu, PAD_X)  # wrap back to chase
+
         changes = 0
         last = heartbeat(emu)
         for _ in range(600):
@@ -144,8 +164,31 @@ def main() -> int:
         steer_delta = sum(a != b for a, b in zip(accelerated, steered))
         assert steer_delta > 5000, "Stock steering did not alter the view"
         assert max(camera_probe(emu)) > 200, "chase camera snapped to player instead of lagging"
+        assert max(collision_probe(emu)) > 200, "hard steering never reached collision response"
+        assert max(wall_collision_probe(emu)) > 200, "hard steering never reached a source wall"
+        report["collision_probe_rgb"] = list(collision_probe(emu))
+        report["wall_collision_probe_rgb"] = list(wall_collision_probe(emu))
         report["acceleration_changed_rgb_bytes"] = accel_delta
         report["steering_changed_rgb_bytes"] = steer_delta
+
+        # Reverse the steering used to hit the guardrail and keep accelerating.
+        # The QA position nibbles must continue changing: repeated rollback to
+        # the same embedded point was the wall-sticking regression.
+        recovery_changes = 0
+        last_position = position_probe(emu)
+        for _ in range(240):
+            emu.run(1, {PAD_C, PAD_LEFT})
+            current_position = position_probe(emu)
+            if current_position != last_position:
+                recovery_changes += 1
+                last_position = current_position
+        recovered = capture(emu, args.out, "12b_wall_collision_recovered", report)
+        recovery_delta = sum(a != b for a, b in zip(steered, recovered))
+        assert recovery_changes >= 6, \
+            f"car remained pinned to wall; only {recovery_changes} position changes"
+        assert recovery_delta > 5000, "driving away from wall did not resume world movement"
+        report["wall_recovery_position_changes"] = recovery_changes
+        report["wall_recovery_changed_rgb_bytes"] = recovery_delta
         emu.run(60)
 
         report["vblanks_to_pause"] = press_transition(emu, PAD_START)
