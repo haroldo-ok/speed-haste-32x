@@ -2,8 +2,8 @@
 """Convert the original SPEEDH.JCL data into the compact 32X runtime format.
 
 The converter follows the structures and coordinate transforms in jclib.c,
-racemap.c, sectors.c, is2code.c and object3d.c. It imports only shareware
-circuit 0 and the assets required by the 32X edition.
+racemap.c, sectors.c, is2code.c and object3d.c. It imports both shareware
+circuits and the assets required by the 32X edition.
 """
 from __future__ import annotations
 
@@ -195,14 +195,59 @@ def parse_path(jcl: JCL, number: int = 0) -> bytes:
     return bytes(out)
 
 
+def trunc_div(numerator: int, denominator: int) -> int:
+    """C signed division, needed for sectors.c's exact edge convention."""
+    value = abs(numerator) // abs(denominator)
+    return -value if (numerator < 0) != (denominator < 0) else value
+
+
+def point_in_sector(vertices, sides, x: int, y: int) -> bool:
+    """Python form of SEC_IsInSector's half-open vertical-ray test."""
+    hits = 0
+    for v0, v1, _texture, _other in sides:
+        x0, y0 = vertices[v0]
+        x1, y1 = vertices[v1]
+        if not ((x >= x0 and x < x1) or (x < x0 and x >= x1)):
+            continue
+        if y0 < y and y1 < y:
+            hits += 1
+        elif y0 < y or y1 < y:
+            if x0 < x1:
+                iy = y0 + trunc_div((x - x0) * (y1 - y0), x1 - x0)
+            else:
+                iy = y1 + trunc_div((x - x1) * (y0 - y1), x0 - x1)
+            if iy < y:
+                hits += 1
+    return bool(hits & 1)
+
+
+def find_source_sector(vertices, sectors, map_x: int, map_y: int) -> int:
+    """Assign a DAT thing to the same explicit SEC polygon as the DOS game."""
+    x, y = map_x << 4, map_y << 4
+    for index, (_flags, sides) in enumerate(sectors):
+        if point_in_sector(vertices, sides, x, y):
+            return index
+    return -1  # Original SEC map's implicit default sector.
+
+
 def parse_sectors(jcl: JCL, number: int, sprite_id: dict[str, int]):
+    """Import the complete SEC topology, not just drawable guardrails.
+
+    Runtime sector coordinates retain the original unsigned 16-bit SEC space.
+    Sector records are compact, fixed-size metadata (first side, count, flags,
+    bounds), while each side stores vertex indices, adjacency and the optional
+    drawable wall index. This lets physics search only the current polygon and
+    its neighbours, matching SEC_FindSector without rebuilding pointers.
+    """
     lines = [line.strip() for line in jcl.get(f"MAP{number:02}.SEC").decode("ascii").replace("\r", "").split("\n")]
     lines = [line for line in lines if line and not line.startswith(";")]
-    vertex_count, sector_count, _side_count = (int(v, 0) for v in lines[0].split())
+    vertex_count, sector_count, declared_side_count = (int(v, 0) for v in lines[0].split())
     cursor = 2  # skip header + Vertices
     vertices = []
     for _ in range(vertex_count):
         x, y = (int(v, 0) for v in lines[cursor].split())
+        if not (0 <= x <= 0xFFFF and 0 <= y <= 0xFFFF):
+            raise ValueError("SEC vertex is outside compact unsigned-16 range")
         vertices.append((x, y))
         cursor += 1
     if lines[cursor].lower() != "sectors":
@@ -216,33 +261,58 @@ def parse_sectors(jcl: JCL, number: int, sprite_id: dict[str, int]):
         for _ in range(side_count):
             fields = shlex.split(lines[cursor])
             cursor += 1
-            sides.append((int(fields[0], 0), int(fields[1], 0),
-                          fields[2], int(fields[3], 0)))
+            v0, v1, other = int(fields[0], 0), int(fields[1], 0), int(fields[3], 0)
+            if not (0 <= v0 < vertex_count and 0 <= v1 < vertex_count):
+                raise ValueError("SEC side has invalid vertex index")
+            if not (-1 <= other < sector_count):
+                raise ValueError("SEC side has invalid adjacency")
+            sides.append((v0, v1, fields[2], other))
         sectors.append((flags, sides))
+    if sum(len(sides) for _flags, sides in sectors) != declared_side_count:
+        raise ValueError("SEC side count does not match header")
 
     walls = []
+    sector_records = bytearray()
+    side_records = bytearray()
     collision_count = 0
+    first_side = 0
     for flags, sides in sectors:
+        used_vertices = [vertex for side in sides for vertex in side[:2]]
+        xs = [vertices[index][0] for index in used_vertices]
+        ys = [vertices[index][1] for index in used_vertices]
+        if len(sides) > 255 or flags > 255:
+            raise ValueError("SEC sector exceeds compact record")
+        sector_records += u16(first_side) + bytes((len(sides), flags))
+        sector_records += u16(min(xs)) + u16(min(ys)) + u16(max(xs)) + u16(max(ys))
+        first_side += len(sides)
+
         for v0, v1, texture, other in sides:
-            if not texture:
-                continue
-            other_flags = sectors[other][0] if 0 <= other < len(sectors) else 0
-            collision = int(bool(flags) != bool(other_flags))
-            collision_count += collision
-            x0, y0 = vertices[v0]
-            x1, y1 = vertices[v1]
-            # SEC_TOMAP: convert once at build time, outside all render/physics loops.
-            wx0 = ((x0 << 15) + (1 << 30)) & 0xFFFFFFFF
-            wy0 = ((y0 << 15) + (1 << 30)) & 0xFFFFFFFF
-            wx1 = ((x1 << 15) + (1 << 30)) & 0xFFFFFFFF
-            wy1 = ((y1 << 15) + (1 << 30)) & 0xFFFFFFFF
-            walls.append((wx0, wy0, wx1, wy1,
-                          sprite_id[texture.upper() + ".IS2"], collision))
-    payload = bytearray()
+            wall_index = 0xFFFF
+            if texture:
+                other_flags = sectors[other][0] if 0 <= other < len(sectors) else 0
+                collision = int(bool(flags) != bool(other_flags))
+                collision_count += collision
+                x0, y0 = vertices[v0]
+                x1, y1 = vertices[v1]
+                # SEC_TOMAP: convert once at build time, outside render loops.
+                wx0 = ((x0 << 15) + (1 << 30)) & 0xFFFFFFFF
+                wy0 = ((y0 << 15) + (1 << 30)) & 0xFFFFFFFF
+                wx1 = ((x1 << 15) + (1 << 30)) & 0xFFFFFFFF
+                wy1 = ((y1 << 15) + (1 << 30)) & 0xFFFFFFFF
+                wall_index = len(walls)
+                walls.append((wx0, wy0, wx1, wy1,
+                              sprite_id[texture.upper() + ".IS2"], collision))
+            side_records += u16(v0) + u16(v1) + s16(other) + u16(wall_index)
+
+    wall_payload = bytearray()
     for x0, y0, x1, y1, texture, collision in walls:
-        payload += u32(x0) + u32(y0) + u32(x1) + u32(y1)
-        payload += u16(texture) + u16(collision)
-    return bytes(payload), len(walls), collision_count
+        wall_payload += u32(x0) + u32(y0) + u32(x1) + u32(y1)
+        wall_payload += u16(texture) + u16(collision)
+    vertex_payload = b"".join(u16(x) + u16(y) for x, y in vertices)
+    return (bytes(wall_payload), len(walls), collision_count,
+            vertex_payload, bytes(sector_records), bytes(side_records),
+            vertex_count, sector_count, declared_side_count,
+            vertices, sectors)
 
 
 def parse_i3d(data: bytes):
@@ -468,16 +538,60 @@ def main() -> int:
 
     for track in tracks:
         number = track["number"]
-        walls, wall_count, collision_count = parse_sectors(jcl, number, sprite_id)
+        (walls, wall_count, collision_count, vertices, sectors, sector_sides,
+         vertex_count, sector_count, sector_side_count,
+         source_vertices, source_sectors) = parse_sectors(jcl, number, sprite_id)
         track["wall_count"] = wall_count
         track["collision_count"] = collision_count
+        track["vertex_count"] = vertex_count
+        track["sector_count"] = sector_count
+        track["sector_side_count"] = sector_side_count
         blob.add(f"MAP{number}_WALLS", walls, 4)
+        blob.add(f"MAP{number}_SECTOR_VERTICES", vertices, 4)
+        blob.add(f"MAP{number}_SECTORS", sectors, 4)
+        blob.add(f"MAP{number}_SECTOR_SIDES", sector_sides, 4)
         obstacles = bytearray()
-        for x, y, angle, name in track["obstacles"]:
+        object_buckets: list[list[int]] = [[] for _ in range(sector_count + 1)]
+        default_bins: list[list[int]] = [[] for _ in range(16 * 16)]
+        for obstacle_index, (x, y, angle, name) in enumerate(track["obstacles"]):
             world_x = ((x << 19) + (1 << 30)) & 0xFFFFFFFF
             world_y = ((y << 19) + (1 << 30)) & 0xFFFFFFFF
             obstacles += u32(world_x) + u32(world_y) + u16(angle) + u16(sprite_id[name])
+            sector = find_source_sector(source_vertices, source_sectors, x, y)
+            object_buckets[sector if sector >= 0 else sector_count].append(obstacle_index)
+            if sector < 0:
+                bin_index = ((world_y >> 28) << 4) | (world_x >> 28)
+                default_bins[bin_index].append(obstacle_index)
         blob.add(f"MAP{number}_OBSTACLES", obstacles, 4)
+
+        # Per-sector ranges avoid scanning 263/325 objects every frame. The
+        # final bucket is the implicit default sector, which SEC_Render always
+        # appends after its bounded adjacency traversal.
+        sector_object_meta = bytearray()
+        sector_object_indices = bytearray()
+        first_object = 0
+        for bucket in object_buckets:
+            sector_object_meta += u16(first_object) + u16(len(bucket))
+            sector_object_indices += b"".join(u16(index) for index in bucket)
+            first_object += len(bucket)
+        if first_object != len(track["obstacles"]):
+            raise ValueError("sector object lists lost an obstacle")
+        track["default_object_count"] = len(object_buckets[-1])
+        blob.add(f"MAP{number}_SECTOR_OBJECT_META", sector_object_meta, 4)
+        blob.add(f"MAP{number}_SECTOR_OBJECT_INDICES", sector_object_indices, 4)
+
+        default_bin_meta = bytearray()
+        default_bin_indices = bytearray()
+        first_default = 0
+        for bucket in default_bins:
+            default_bin_meta += u16(first_default) + u16(len(bucket))
+            default_bin_indices += b"".join(u16(index) for index in bucket)
+            first_default += len(bucket)
+        if first_default != len(object_buckets[-1]):
+            raise ValueError("default-sector spatial bins lost an obstacle")
+        track["default_nonempty_bins"] = sum(bool(bucket) for bucket in default_bins)
+        blob.add(f"MAP{number}_DEFAULT_OBJECT_BIN_META", default_bin_meta, 4)
+        blob.add(f"MAP{number}_DEFAULT_OBJECT_BIN_INDICES", default_bin_indices, 4)
 
     # Use the high-detail A meshes for the runtime directional frames so front
     # and rear (nose, cockpit, rear wing/deck) remain visually distinct. Keep
@@ -525,6 +639,13 @@ def main() -> int:
         f"#define SHA_MAP0_CAMERA_COUNT {len(tracks[0]['cameras']) // 12}u",
         f"#define SHA_MAP0_WALL_COUNT {tracks[0]['wall_count']}u",
         f"#define SHA_MAP0_COLLISION_WALL_COUNT {tracks[0]['collision_count']}u",
+        f"#define SHA_MAP0_SECTOR_VERTEX_COUNT {tracks[0]['vertex_count']}u",
+        f"#define SHA_MAP0_SECTOR_COUNT {tracks[0]['sector_count']}u",
+        f"#define SHA_MAP0_SECTOR_SIDE_COUNT {tracks[0]['sector_side_count']}u",
+        f"#define SHA_MAP0_SECTOR_OBJECT_BUCKET_COUNT {tracks[0]['sector_count'] + 1}u",
+        f"#define SHA_MAP0_DEFAULT_OBJECT_COUNT {tracks[0]['default_object_count']}u",
+        "#define SHA_MAP0_DEFAULT_OBJECT_BIN_COUNT 256u",
+        f"#define SHA_MAP0_DEFAULT_OBJECT_NONEMPTY_BINS {tracks[0]['default_nonempty_bins']}u",
         f"#define SHA_MAP0_OBSTACLE_COUNT {len(tracks[0]['obstacles'])}u",
         f"#define SHA_MAP1_TILE_COUNT {len(tracks[1]['combinations'])}u",
         f"#define SHA_MAP1_PATH_COUNT {len(tracks[1]['path']) // 16}u",
@@ -532,6 +653,13 @@ def main() -> int:
         f"#define SHA_MAP1_CAMERA_COUNT {len(tracks[1]['cameras']) // 12}u",
         f"#define SHA_MAP1_WALL_COUNT {tracks[1]['wall_count']}u",
         f"#define SHA_MAP1_COLLISION_WALL_COUNT {tracks[1]['collision_count']}u",
+        f"#define SHA_MAP1_SECTOR_VERTEX_COUNT {tracks[1]['vertex_count']}u",
+        f"#define SHA_MAP1_SECTOR_COUNT {tracks[1]['sector_count']}u",
+        f"#define SHA_MAP1_SECTOR_SIDE_COUNT {tracks[1]['sector_side_count']}u",
+        f"#define SHA_MAP1_SECTOR_OBJECT_BUCKET_COUNT {tracks[1]['sector_count'] + 1}u",
+        f"#define SHA_MAP1_DEFAULT_OBJECT_COUNT {tracks[1]['default_object_count']}u",
+        "#define SHA_MAP1_DEFAULT_OBJECT_BIN_COUNT 256u",
+        f"#define SHA_MAP1_DEFAULT_OBJECT_NONEMPTY_BINS {tracks[1]['default_nonempty_bins']}u",
         f"#define SHA_MAP1_OBSTACLE_COUNT {len(tracks[1]['obstacles'])}u",
         f"#define SHA_SPRITE_COUNT {len(sprite_names)}u",
         "enum SHSpriteId {",
@@ -546,12 +674,18 @@ def main() -> int:
         f"MAP00 {track_names[0]}: tiles={len(tracks[0]['combinations'])}, "
         f"path={len(tracks[0]['path'])//16}, starts={len(tracks[0]['starts'])//8}, "
         f"cameras={len(tracks[0]['cameras'])//12}, walls={tracks[0]['wall_count']}, "
-        f"collision-walls={tracks[0]['collision_count']}, objects={len(tracks[0]['obstacles'])}, "
+        f"collision-walls={tracks[0]['collision_count']}, sectors={tracks[0]['sector_count']}, "
+        f"sector-sides={tracks[0]['sector_side_count']}, objects={len(tracks[0]['obstacles'])}, "
+        f"default-objects={tracks[0]['default_object_count']}, "
+        f"default-bins={tracks[0]['default_nonempty_bins']}/256, "
         f"cached-map-coverage={tracks[0]['cache_coverage'] * 100 // 4096}%\n"
         f"MAP01 {track_names[1]}: tiles={len(tracks[1]['combinations'])}, "
         f"path={len(tracks[1]['path'])//16}, starts={len(tracks[1]['starts'])//8}, "
         f"cameras={len(tracks[1]['cameras'])//12}, walls={tracks[1]['wall_count']}, "
-        f"collision-walls={tracks[1]['collision_count']}, objects={len(tracks[1]['obstacles'])}, "
+        f"collision-walls={tracks[1]['collision_count']}, sectors={tracks[1]['sector_count']}, "
+        f"sector-sides={tracks[1]['sector_side_count']}, objects={len(tracks[1]['obstacles'])}, "
+        f"default-objects={tracks[1]['default_object_count']}, "
+        f"default-bins={tracks[1]['default_nonempty_bins']}/256, "
         f"cached-map-coverage={tracks[1]['cache_coverage'] * 100 // 4096}%\n"
         f"Sprites: {len(sprite_names)}\nCar classes: 2 x 6 I3D models x 16 views\n"
         f"Blob bytes: {len(blob.data)}\n"

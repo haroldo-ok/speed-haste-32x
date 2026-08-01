@@ -1,6 +1,12 @@
 #include "platform.h"
 #include "mars.h"
 
+/* SH7604 watchdog in interval-timer mode. CKS=7 clocks at Sclk/8192, giving
+ * useful sub-millisecond render profiling without overflowing during a normal
+ * phase. PicoDrive updates WTCNT on reads, unlike its currently inert FRT. */
+#define SH2_WTCSR_WTCNT (*(volatile uint16_t *)0xFFFFFE80u)
+#define SH2_WTCNT       (*(volatile uint8_t *)0xFFFFFE81u)
+
 static uint16_t current_fb;
 
 static void init_accessible_framebuffer(void)
@@ -60,10 +66,17 @@ static void init_palette(void)
     pal[25] = MARS_RGB(0, 31, 0);      /* finished */
 }
 
+void platform_profile_timer_init(void)
+{
+    SH2_WTCSR_WTCNT = 0x5A00u; /* WTCNT = 0 */
+    SH2_WTCSR_WTCNT = 0xA527u; /* interval timer, enabled, Sclk/8192 */
+}
+
 void platform_init(void)
 {
     current_fb = 0;
     while ((MARS_SYS_INTMSK & MARS_SH2_ACCESS_VDP) == 0) { }
+    platform_profile_timer_init();
 
     MARS_VDP_DISPMODE = MARS_VDP_PRIO_32X | MARS_224_LINES | MARS_VDP_MODE_256;
     init_palette();
@@ -112,6 +125,11 @@ uint16_t platform_read_pad(void)
 uint32_t platform_vblank_count(void)
 {
     return MARS_SYS_COMM12;
+}
+
+uint8_t platform_profile_ticks(void)
+{
+    return SH2_WTCNT;
 }
 
 void platform_set_vga_palette(const uint8_t *vga_rgb)

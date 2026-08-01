@@ -20,8 +20,8 @@ The current ROM is based on the behavior and formats in the original source rele
 
 `tools/import_speed_haste.py` reads the JCL directory exactly as `jclib.c` does. It imports:
 
-- MAP00 Racer's Edge: 115 tile/rotation combinations, 88 PATH points, 20 starts, 86 wall sides and 263 objects;
-- MAP01 The City: 190 combinations, 186 PATH points, 20 starts, 123 wall sides and 325 objects;
+- MAP00 Racer's Edge: 115 tile/rotation combinations, 88 PATH points, 20 starts, 67 sectors/308 topology sides, 86 rendered wall sides and 263 objects;
+- MAP01 The City: 190 combinations, 186 PATH points, 20 starts, 91 sectors/394 topology sides, 123 rendered wall sides and 325 objects;
 - 112 shared IS2 graphics, both panoramas/cockpits, and 12 original cars.
 
 ## Coordinate and fixed-point conventions
@@ -52,6 +52,10 @@ The displayed viewport is the original 320×200 image centered inside 320×224 N
 
 The job descriptor lives in cache-through SDRAM at `0x26030000`, avoiding SH-2 cache coherency failures.
 
+`SEC_Render()` originally builds a bounded breadth-first sector list. The port mirrors that architecture with a 20-sector low-detail limit and a conservative 120-degree portal cone. Wall IDs are deduplicated and restored to source order. Explicit scenery uses per-sector ranges; objects in the source engine's implicit default sector are additionally grouped into 16×16 wrapping world bins. A source-order candidate mask is built before projection. In the pinned City view this reduces wall work from 123 to 18 records and object transforms from 325 to 89 candidates.
+
+The SH7604 watchdog runs independently on both SH-2s at `/8192`. Calibrated probes separate master panorama time, slave floor time and master synchronization wait. The current frame is 139 master-critical ticks: visibility 3, panorama 44, floor wait 9, walls 25, objects 35, cars/effects 7 and HUD 16. The overlapping slave floor takes 53 ticks, proving that floor—not panorama—is now the longer parallel task.
+
 ## Car rendering
 
 Rendering the B3D car polygons at runtime cost about two VBlanks per scene. The original `FS3` system already supports 9/17-angle bitmap vehicles. The importer therefore rotates and rasterizes each original low-detail I3D car into 16 palette-indexed views. Runtime selection uses relative car/camera angle and the same perspective size calculation as `FSP_AddObj()`.
@@ -68,13 +72,17 @@ The regression test also proves that a fixed point ahead of a forward-moving cha
 
 ## Collision and effects
 
-The importer marks sector sides that cross between driveable and default/outside sectors. Their endpoints are converted through `SEC_TOMAP` at build time. The player's 70 Hz tick performs an axis-aligned broad phase, then a closest-point segment test only on nearby marked sides. Collision response follows `userctl.c`: restore the previous position, mirror movement around the wall angle, halve slide speed, reduce RPM, and enter the timed `slidcounter` crash-recovery state.
+The importer now retains the complete `MAPxx.SEC` topology instead of reducing it to drawable walls: 107/136 vertices, 67/91 polygons and 308/394 sides for Racer's Edge/The City. Each 12-byte sector record stores its first side, side count, source flags and bounding box. Each 8-byte side stores two vertex indices, the adjacent sector and an optional rendered-wall index. `sha_find_sector()` reproduces `SEC_IsInSector()`'s half-open ray test and tries the car's current polygon and direct neighbours before the rare full-map fallback. All cars retain their current sector; AI remains PATH-constrained and skips the player's boundary response.
 
-A rollback can itself remain inside the car radius, causing every attempted escape to be reflected into the same wall. The corrected pass uses the previous centre to identify the road side, depenetrates to a 36-unit release radius around the closest segment point, and treats outward/tangential movement as release rather than a new impact. The four-unit contact hysteresis prevents immediate recontact. The restoring integer square root runs only after a narrow-phase hit; the ordinary wall scan adds no normalisation cost. Steering remains active during `slidcounter`, matching the unconditional body-angle turn in `userctl.c`.
+Wall contact uses the asymmetric `PlayerBounds` dimensions from `userctl.c`: `0xB00000` front, `-0x800000` rear and `±0x380000` width, transformed by body angle. The four endpoint rectangle edges and old/mid/new corner positions are tested against only the current sector's collidable sides. Midpoint classification prevents a high-speed 70 Hz step from tunnelling through a thin outside region, while road-polygon overlaps remain passable as in `userctl.c`. A corner's destination sector provides the road/default classification.
+
+Racer's Edge crosses the signed representation seam at world `0x80000000`. Converting each endpoint or rectangle corner separately produced ten phantom 15–16K-unit MAP00 walls even though every real wrapped wall delta is below 1.4K units. Collision now subtracts unsigned wrapping coordinates first and expresses walls, old corners and new corners in one car-relative frame. The automated MAP00 route covers all 88 PATH points and reports no collision (`0xFFFF`).
+
+Collision response still mirrors movement around the source wall angle, halves slide speed, reduces RPM and enters the timed `slidcounter` recovery. A rollback can itself remain embedded, so the previous centre determines the road-facing wall normal and the rectangle's projected support radius determines depenetration distance. A four-unit release margin prevents immediate recontact. Outward/tangential movement is released without another reflection, and steering stays active during `slidcounter`, matching the unconditional body-angle turn in the DOS source. Integer square-root normalisation occurs only after actual contact, not in the ordinary local-sector scan.
 
 Player/AI overlap uses the original 7/8 momentum-loss rule and separation impulse. Collisions spawn the original `SPRK01AA..06AA` sequence; off-road movement uses the `GND*` smoke families, and hard Stock braking/sliding leaves persistent ground skid marks.
 
-AI remains PATH-constrained as in `cars.c`; it deliberately does not run the player's expensive sector-boundary pass.
+AI remains PATH-constrained as in `cars.c`; it updates its sector hint but deliberately does not run the player's rectangular boundary-response pass.
 
 ## Trackside cameras
 
@@ -86,8 +94,13 @@ MAP thing type `0xF2xx` is imported as an original static camera with height `90
 - Wall top/bottom/texture interpolation is precomputed as DDA steps outside the column loop.
 - Constant scales use shifts (`<< 12`, `<< 7`) in map/tile addressing.
 - MAP wall coordinates are converted at build time.
+- Physics traverses the current sector's compact side range rather than every track wall; adjacency is tested before a full polygon search.
 - The importer frequency-sorts tile/rotation combinations. A 28-tile aligned SDRAM cache covers 95% of Racer's Edge and 92% of The City cells.
-- Current map indices, panorama, mountains, and shade table are copied through cache-through SDRAM addresses, following D32XR's hot-lump/cache strategy.
+- Current map indices, panorama, mountains, shade table, sector topology, object ranges and default-bin indices are copied through cache-through SDRAM addresses, following D32XR's hot-lump/cache strategy.
+- A source-style 20-sector traversal builds compact visible wall/object work lists.
+- A hand-written SH-2 floor kernel holds map/tile/shade pointers and coordinates in registers for 80 samples, selects cached versus ROM tiles, and emits both scanlines with aligned packed writes.
+- Panorama rows process four pixels per aligned write. Only one group can cross the horizontal seam; mountain transparency falls back to byte writes only for mixed groups.
+- Floor shade-row selection and all perspective-row calculations remain outside the assembly horizontal loop.
 - Obstacle/wall packed records are traversed directly instead of rebuilding track descriptors in each iteration.
 
 ## Timing
@@ -98,7 +111,9 @@ Measured with the pinned PicoDrive core:
 
 - first source-based renderer: approximately 3–4 completed fps, with slow-motion physics;
 - Racer's Edge / Formula One optimized renderer: 11.6 completed fps;
-- The City / Stock stress configuration after collision/effect/cache pass: 12.0 completed fps;
+- The City / Stock after collision/effect/cache pass: 12.0 completed fps;
+- The City / Stock after visible-sector/object filtering: 12.7 completed fps;
+- The City / Stock after SH-2 floor assembly, default-object bins and packed panorama writes: **15.0 completed fps**;
 - simulation: independent 70 Hz, so speed, countdown and race time are correct.
 
 ## Stock handling

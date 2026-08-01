@@ -1,6 +1,6 @@
 Tracks: 2 shareware circuits
-MAP00 Racer's Edge: tiles=115, path=88, starts=20, cameras=11, walls=86, collision-walls=76, objects=263, cached-map-coverage=95%
-MAP01 The City: tiles=190, path=186, starts=20, cameras=36, walls=123, collision-walls=123, objects=325, cached-map-coverage=92%
+MAP00 Racer's Edge: tiles=115, path=88, starts=20, cameras=11, walls=86, collision-walls=76, sectors=67, sector-sides=308, objects=263, default-objects=126, default-bins=17/256, cached-map-coverage=95%
+MAP01 The City: tiles=190, path=186, starts=20, cameras=36, walls=123, collision-walls=123, sectors=91, sector-sides=394, objects=325, default-objects=116, default-bins=23/256, cached-map-coverage=92%
 Sprites: 136
 Car classes: 2 x 6 I3D models x 16 views
-Blob bytes: 2508024
+Blob bytes: 2520860

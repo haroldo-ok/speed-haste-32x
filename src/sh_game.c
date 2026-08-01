@@ -9,8 +9,10 @@
 
 #define FP30_ONE (1L << 30)
 #define MAX_REVO (1L << 22)
-#define WALL_COLLISION_RADIUS 32
-#define WALL_RELEASE_RADIUS 36
+#define PLAYER_FRONT 0xB00000
+#define PLAYER_REAR (-0x800000)
+#define PLAYER_HALF_WIDTH 0x380000
+#define WALL_RELEASE_MARGIN 4
 
 static const uint16_t car_max_speed[2][6] = {
     {310, 315, 320, 320, 325, 330}, /* Formula One, CARS.LST */
@@ -66,13 +68,13 @@ static void nearest_wall_point(int32_t px, int32_t py, int32_t x0, int32_t y0,
  * simulation tick. Coordinates here use the collision pass's 14.18 -> integer
  * reduction; converting through uint32_t keeps world wrapping defined. */
 static void release_from_wall(SHCar *car, int32_t qx, int32_t qy,
-                              int32_t nx, int32_t ny)
+                              int32_t nx, int32_t ny, int32_t radius)
 {
     uint32_t distance = isqrt32((uint32_t)(nx * nx + ny * ny));
     int32_t rx, ry;
     if (!distance) return;
-    rx = qx + muldiv(nx, WALL_RELEASE_RADIUS, (int32_t)distance);
-    ry = qy + muldiv(ny, WALL_RELEASE_RADIUS, (int32_t)distance);
+    rx = qx + muldiv(nx, radius, (int32_t)distance);
+    ry = qy + muldiv(ny, radius, (int32_t)distance);
     car->x = ((uint32_t)rx) << 18;
     car->y = ((uint32_t)ry) << 18;
 }
@@ -103,6 +105,7 @@ static void get_start(uint8_t track, unsigned index, SHCar *car)
     car->angle = sha_rd16(p + 4);
     car->movangle = car->angle;
     car->ma = car->angle;
+    car->sector = (int8_t)sha_find_sector(&assets, -1, car->x, car->y);
 }
 
 static void clear_car(SHCar *car)
@@ -164,6 +167,9 @@ static void reset_race(SHGame *game)
     for (i = 0; i < SH_EFFECTS; ++i) game->effects[i].type = SH_FX_NONE;
     game->collision_count = 0;
     game->wall_collision_count = 0;
+    game->qa_route = 0;
+    game->qa_route_point = 0;
+    game->qa_collision_point = 0xFFFFu;
     game->race_ticks = 0;
     game->countdown = 3 * 70 + 69; /* race.c startDelay */
     game->mode = SH_MODE_COUNTDOWN;
@@ -246,80 +252,278 @@ static void update_effects(SHGame *game)
     }
 }
 
+static void car_corners(const SHCar *car, uint32_t x, uint32_t y,
+                        uint32_t out_x[4], uint32_t out_y[4])
+{
+    const int32_t fx = sha_cos30(car->angle);
+    const int32_t fy = sha_sin30(car->angle);
+    const int32_t lx = -fy;
+    const int32_t ly = fx;
+    static const int32_t longitudinal[4] = {
+        PLAYER_FRONT, PLAYER_FRONT, PLAYER_REAR, PLAYER_REAR
+    };
+    static const int32_t lateral[4] = {
+        PLAYER_HALF_WIDTH, -PLAYER_HALF_WIDTH,
+        -PLAYER_HALF_WIDTH, PLAYER_HALF_WIDTH
+    };
+    unsigned i;
+    for (i = 0; i < 4; ++i) {
+        out_x[i] = x + (uint32_t)(mul30(longitudinal[i], fx) +
+                                  mul30(lateral[i], lx));
+        out_y[i] = y + (uint32_t)(mul30(longitudinal[i], fy) +
+                                  mul30(lateral[i], ly));
+    }
+}
+
+static int64_t cross2d(int32_t ax, int32_t ay, int32_t bx, int32_t by,
+                       int32_t cx, int32_t cy)
+{
+    return (int64_t)(bx - ax) * (cy - ay) -
+           (int64_t)(by - ay) * (cx - ax);
+}
+
+static int segments_intersect(int32_t ax, int32_t ay, int32_t bx, int32_t by,
+                              int32_t cx, int32_t cy, int32_t dx, int32_t dy)
+{
+    int64_t ab_c, ab_d, cd_a, cd_b;
+    if ((ax < bx ? bx : ax) < (cx < dx ? cx : dx) ||
+        (cx < dx ? dx : cx) < (ax < bx ? ax : bx) ||
+        (ay < by ? by : ay) < (cy < dy ? cy : dy) ||
+        (cy < dy ? dy : cy) < (ay < by ? ay : by)) return 0;
+    ab_c = cross2d(ax, ay, bx, by, cx, cy);
+    ab_d = cross2d(ax, ay, bx, by, dx, dy);
+    cd_a = cross2d(cx, cy, dx, dy, ax, ay);
+    cd_b = cross2d(cx, cy, dx, dy, bx, by);
+    return ((ab_c <= 0 && ab_d >= 0) || (ab_d <= 0 && ab_c >= 0)) &&
+           ((cd_a <= 0 && cd_b >= 0) || (cd_b <= 0 && cd_a >= 0));
+}
+
+static int sector_is_road(const SHTrackAssets *assets, int16_t sector)
+{
+    SHSector data;
+    if (sector < 0 || (uint16_t)sector >= assets->sector_count) return 0;
+    sha_get_sector(assets, (uint16_t)sector, &data);
+    return data.flags != 0;
+}
+
+static int32_t rectangle_release_radius(const SHCar *car, int32_t nx, int32_t ny)
+{
+    uint32_t corners_x[4], corners_y[4];
+    int64_t minimum = 0;
+    uint32_t length = isqrt32((uint32_t)(nx * nx + ny * ny));
+    unsigned i;
+    if (!length) return 48;
+    car_corners(car, car->x, car->y, corners_x, corners_y);
+    for (i = 0; i < 4; ++i) {
+        int32_t dx = (int32_t)(corners_x[i] - car->x) >> 18;
+        int32_t dy = (int32_t)(corners_y[i] - car->y) >> 18;
+        int64_t projection = (int64_t)dx * nx + (int64_t)dy * ny;
+        if (projection < minimum) minimum = projection;
+    }
+    return sh2_idiv((int32_t)(-minimum + length - 1), (int32_t)length) +
+           WALL_RELEASE_MARGIN;
+}
+
 static int collide_with_wall(SHGame *game, SHCar *car, uint32_t old_x, uint32_t old_y)
 {
     SHTrackAssets assets;
-    const int32_t cx = ((int32_t)car->x) >> 18;
-    const int32_t cy = ((int32_t)car->y) >> 18;
-    const int32_t old_cx = ((int32_t)old_x) >> 18;
-    const int32_t old_cy = ((int32_t)old_y) >> 18;
-    unsigned i;
+    SHSector old_sector_data;
+    SHWall hit_wall;
+    uint32_t old_corner_x[4], old_corner_y[4];
+    uint32_t new_corner_x[4], new_corner_y[4];
+    int32_t bad_x = 0, bad_y = 0;
+    const int32_t old_frame_x = (int32_t)old_x >> 18;
+    const int32_t old_frame_y = (int32_t)old_y >> 18;
+    const int32_t new_frame_x = old_frame_x + ((int32_t)(car->x - old_x) >> 18);
+    const int32_t new_frame_y = old_frame_y + ((int32_t)(car->y - old_y) >> 18);
+    int16_t old_sector = car->sector;
+    int16_t new_sector;
+    uint32_t best_distance = 0xFFFFFFFFu;
+    int found_wall = 0;
+    int has_bad_corner = 0;
+    int has_bad_sweep = 0;
+    unsigned i, j;
+
     sha_get_track(game->selected_track, &assets);
-    for (i = 0; i < assets.wall_count; ++i) {
-        const uint8_t *record = assets.walls + i * 20u;
-        int32_t x0, y0, vx, vy, length2, qx, qy, dx, dy;
-        if (!(sha_rd16(record + 18) & SH_WALL_COLLIDABLE)) continue;
-        x0 = ((int32_t)sha_rd32(record)) >> 18;
-        y0 = ((int32_t)sha_rd32(record + 4)) >> 18;
-        vx = ((int32_t)(sha_rd32(record + 8) - sha_rd32(record))) >> 18;
-        vy = ((int32_t)(sha_rd32(record + 12) - sha_rd32(record + 4))) >> 18;
-        if (cx < (x0 < x0 + vx ? x0 : x0 + vx) - WALL_RELEASE_RADIUS ||
-            cx > (x0 > x0 + vx ? x0 : x0 + vx) + WALL_RELEASE_RADIUS ||
-            cy < (y0 < y0 + vy ? y0 : y0 + vy) - WALL_RELEASE_RADIUS ||
-            cy > (y0 > y0 + vy ? y0 : y0 + vy) + WALL_RELEASE_RADIUS) continue;
+    if (old_sector < 0 || (uint16_t)old_sector >= assets.sector_count)
+        old_sector = sha_find_sector(&assets, -1, old_x, old_y);
+    new_sector = sha_find_sector(&assets, old_sector, car->x, car->y);
+
+    /* userctl.c skips boundary collision when a car was already in a default
+     * sector; keep that escape hatch instead of trapping an off-road car. */
+    if (!sector_is_road(&assets, old_sector)) {
+        car->sector = (int8_t)new_sector;
+        car->slidcounter = 0;
+        car->slidspeed = 0;
+        car->ma = car->angle;
+        return 0;
+    }
+
+    car_corners(car, old_x, old_y, old_corner_x, old_corner_y);
+    car_corners(car, car->x, car->y, new_corner_x, new_corner_y);
+    for (i = 0; i < 4; ++i) {
+        uint32_t mid_x = old_corner_x[i] +
+            (uint32_t)((int32_t)(new_corner_x[i] - old_corner_x[i]) / 2);
+        uint32_t mid_y = old_corner_y[i] +
+            (uint32_t)((int32_t)(new_corner_y[i] - old_corner_y[i]) / 2);
+        int16_t corner_sector = sha_find_sector(&assets, new_sector,
+                                                new_corner_x[i], new_corner_y[i]);
+        int16_t middle_sector = sha_find_sector(&assets, old_sector, mid_x, mid_y);
+        if (!sector_is_road(&assets, corner_sector) && !has_bad_corner) {
+            has_bad_corner = 1;
+            bad_x = new_frame_x + ((int32_t)(new_corner_x[i] - car->x) >> 18);
+            bad_y = new_frame_y + ((int32_t)(new_corner_y[i] - car->y) >> 18);
+        }
+        if (!sector_is_road(&assets, middle_sector)) has_bad_sweep = 1;
+    }
+
+    sha_get_sector(&assets, (uint16_t)old_sector, &old_sector_data);
+    for (i = 0; i < old_sector_data.side_count; ++i) {
+        SHSectorSide side;
+        SHWall wall;
+        int32_t x0, y0, x1, y1, vx, vy, length2;
+        int geometry_hit = 0;
+        sha_get_sector_side(&assets, old_sector_data.first_side + i, &side);
+        if (sector_is_road(&assets, side.other)) continue;
+        if (side.wall != 0xFFFFu) {
+            sha_get_wall(game->selected_track, side.wall, &wall);
+        } else {
+            SHSectorVertex v0, v1;
+            /* The DOS fallback still blocks an untextured road/default edge.
+             * Build its world endpoints directly from complete SEC topology. */
+            sha_get_sector_vertex(&assets, side.v0, &v0);
+            sha_get_sector_vertex(&assets, side.v1, &v1);
+            wall.x0 = ((uint32_t)v0.x << 15) + 0x40000000u;
+            wall.y0 = ((uint32_t)v0.y << 15) + 0x40000000u;
+            wall.x1 = ((uint32_t)v1.x << 15) + 0x40000000u;
+            wall.y1 = ((uint32_t)v1.y << 15) + 0x40000000u;
+            wall.texture = 0xFFFFu;
+            wall.flags = SH_WALL_COLLIDABLE;
+        }
+        /* Keep walls and the swept rectangle in one frame centred on the old
+         * car position. This also unwraps a car crossing the signed seam. */
+        x0 = old_frame_x + ((int32_t)(wall.x0 - old_x) >> 18);
+        y0 = old_frame_y + ((int32_t)(wall.y0 - old_y) >> 18);
+        /* World coordinates wrap at signed 0x80000000. Subtract while still
+         * unsigned, then sign-extend the short wall delta. Converting both
+         * endpoints separately creates a phantom ~16384-unit wall whenever a
+         * real side crosses that seam (the Racer's Edge backward-push bug). */
+        vx = ((int32_t)(wall.x1 - wall.x0)) >> 18;
+        vy = ((int32_t)(wall.y1 - wall.y0)) >> 18;
+        x1 = x0 + vx; y1 = y0 + vy;
         length2 = vx * vx + vy * vy;
         if (length2 <= 0) continue;
-        nearest_wall_point(cx, cy, x0, y0, vx, vy, length2, &qx, &qy);
-        dx = cx - qx; dy = cy - qy;
-        if (dx * dx + dy * dy < WALL_COLLISION_RADIUS * WALL_COLLISION_RADIUS) {
-            int32_t old_qx, old_qy, nx, ny;
-            int64_t normal_motion;
-            uint16_t wall_angle;
-            int16_t reflection;
 
-            /* The previous point identifies the road side. Resolve to that
-             * side rather than merely restoring a possibly-overlapping point. */
-            nearest_wall_point(old_cx, old_cy, x0, y0, vx, vy, length2,
-                               &old_qx, &old_qy);
-            nx = old_cx - old_qx;
-            ny = old_cy - old_qy;
-            if (nx == 0 && ny == 0) {
-                /* If the old centre was exactly on the line, use the side
-                 * opposite the attempted step. This cannot push it through. */
-                nx = -dx; ny = -dy;
-                if (nx == 0 && ny == 0) { nx = -vy; ny = vx; }
+        /* Endpoint rectangle edges plus each corner's swept path prevent a
+         * fast tick from tunnelling through a thin boundary polygon. */
+        for (j = 0; j < 4 && !geometry_hit; ++j) {
+            unsigned next = (j + 1u) & 3u;
+            int32_t nx0 = new_frame_x + ((int32_t)(new_corner_x[j] - car->x) >> 18);
+            int32_t ny0 = new_frame_y + ((int32_t)(new_corner_y[j] - car->y) >> 18);
+            int32_t nx1 = new_frame_x + ((int32_t)(new_corner_x[next] - car->x) >> 18);
+            int32_t ny1 = new_frame_y + ((int32_t)(new_corner_y[next] - car->y) >> 18);
+            int32_t ox = old_frame_x + ((int32_t)(old_corner_x[j] - old_x) >> 18);
+            int32_t oy = old_frame_y + ((int32_t)(old_corner_y[j] - old_y) >> 18);
+            geometry_hit = (has_bad_corner || has_bad_sweep) &&
+                           segments_intersect(x0, y0, x1, y1,
+                                              ox, oy, nx0, ny0);
+            /* Match userctl.c: an endpoint rectangle edge only blocks when a
+             * corner actually resolves to default/outside. Road polygons can
+             * overlap at joins, so edge-only contact there is not a wall. */
+            if (!geometry_hit && has_bad_corner)
+                geometry_hit = segments_intersect(x0, y0, x1, y1,
+                                                  nx0, ny0, nx1, ny1);
+        }
+        if (geometry_hit) {
+            hit_wall = wall;
+            found_wall = 1;
+            break;
+        }
+        if (has_bad_corner) {
+            int32_t qx, qy, dx, dy;
+            uint32_t distance;
+            nearest_wall_point(bad_x, bad_y, x0, y0, vx, vy, length2, &qx, &qy);
+            dx = bad_x - qx; dy = bad_y - qy;
+            distance = (uint32_t)(dx * dx + dy * dy);
+            if (distance < best_distance) {
+                best_distance = distance;
+                hit_wall = wall;
+                found_wall = 1;
             }
-            normal_motion = (int64_t)(int32_t)(car->x - old_x) * nx +
-                            (int64_t)(int32_t)(car->y - old_y) * ny;
-
-            if (normal_motion >= 0) {
-                /* Already leaving or travelling along the guardrail. Only
-                 * depenetrate; reflecting here is the old wall-sticking bug. */
-                release_from_wall(car, qx, qy, nx, ny);
-                return 0;
-            }
-
-            car->x = old_x; car->y = old_y;
-            if (nx * nx + ny * ny < WALL_RELEASE_RADIUS * WALL_RELEASE_RADIUS)
-                release_from_wall(car, old_qx, old_qy, nx, ny);
-
-            wall_angle = sha_vector_angle(vx, -vy);
-            reflection = (int16_t)(2 * (wall_angle - car->ma));
-            car->ma = (uint16_t)(car->ma + reflection);
-            car->slidspeed = car->v >> 1;
-            car->slidcounter = (int16_t)(10 +
-                muldiv(abs32(car->v >> 14), abs32(reflection), 0x10000));
-            car->slidva = (int16_t)muldiv(reflection >> 4, car->slidspeed,
-                                          1 << 22);
-            car->sliding = 1;
-            car->revo -= car->revo / 50;
-            ++game->collision_count;
-            ++game->wall_collision_count;
-            add_effect(game, SH_FX_SPARK, car->x, car->y, 0x40000,
-                       0, 0, wall_angle, 0);
-            return 1;
         }
     }
+
+    if (found_wall && (has_bad_corner || best_distance == 0xFFFFFFFFu)) {
+        int32_t x0 = old_frame_x + ((int32_t)(hit_wall.x0 - old_x) >> 18);
+        int32_t y0 = old_frame_y + ((int32_t)(hit_wall.y0 - old_y) >> 18);
+        int32_t vx = ((int32_t)(hit_wall.x1 - hit_wall.x0)) >> 18;
+        int32_t vy = ((int32_t)(hit_wall.y1 - hit_wall.y0)) >> 18;
+        int32_t length2 = vx * vx + vy * vy;
+        int32_t old_cx = old_frame_x;
+        int32_t old_cy = old_frame_y;
+        int32_t qx, qy, nx = -vy, ny = vx;
+        int32_t radius, old_distance;
+        int64_t side_dot, normal_motion;
+        uint16_t wall_angle;
+        int16_t reflection;
+
+        nearest_wall_point(old_cx, old_cy, x0, y0, vx, vy, length2, &qx, &qy);
+        side_dot = (int64_t)(old_cx - x0) * nx + (int64_t)(old_cy - y0) * ny;
+        if (side_dot < 0) { nx = -nx; ny = -ny; }
+        else if (side_dot == 0) {
+            int32_t attempted_x = (int32_t)(car->x - old_x) >> 18;
+            int32_t attempted_y = (int32_t)(car->y - old_y) >> 18;
+            if ((int64_t)attempted_x * nx + (int64_t)attempted_y * ny > 0) {
+                nx = -nx; ny = -ny;
+            }
+        }
+        radius = rectangle_release_radius(car, nx, ny);
+        normal_motion = (int64_t)(int32_t)(car->x - old_x) * nx +
+                        (int64_t)(int32_t)(car->y - old_y) * ny;
+
+        if (normal_motion >= 0) {
+            /* A rectangle still overlapping while moving out or parallel is
+             * depenetrated once, but never reflected back into the guardrail. */
+            int32_t cx = new_frame_x;
+            int32_t cy = new_frame_y;
+            nearest_wall_point(cx, cy, x0, y0, vx, vy, length2, &qx, &qy);
+            release_from_wall(car, qx, qy, nx, ny, radius);
+            car->sector = (int8_t)sha_find_sector(&assets, old_sector,
+                                                  car->x, car->y);
+            return 0;
+        }
+
+        car->x = old_x; car->y = old_y;
+        old_distance = sh2_idiv((int32_t)((int64_t)(old_cx - x0) * nx +
+                                             (int64_t)(old_cy - y0) * ny),
+                                (int32_t)isqrt32((uint32_t)length2));
+        if (old_distance < radius)
+            release_from_wall(car, qx, qy, nx, ny, radius);
+        car->sector = (int8_t)sha_find_sector(&assets, old_sector,
+                                              car->x, car->y);
+
+        wall_angle = sha_vector_angle(vx, -vy);
+        reflection = (int16_t)(2 * (wall_angle - car->ma));
+        car->ma = (uint16_t)(car->ma + reflection);
+        car->slidspeed = car->v >> 1;
+        car->slidcounter = (int16_t)(10 +
+            muldiv(abs32(car->v >> 14), abs32(reflection), 0x10000));
+        car->slidva = (int16_t)muldiv(reflection >> 4, car->slidspeed,
+                                      1 << 22);
+        car->sliding = 1;
+        car->revo -= car->revo / 50;
+        ++game->collision_count;
+        ++game->wall_collision_count;
+#ifdef ENABLE_QA_HOOKS
+        if (game->qa_route == 1 && game->qa_collision_point == 0xFFFFu)
+            game->qa_collision_point = game->qa_route_point;
+#endif
+        add_effect(game, SH_FX_SPARK, car->x, car->y, 0x40000,
+                   0, 0, wall_angle, 0);
+        return 1;
+    }
+
+    car->sector = (int8_t)new_sector;
     return 0;
 }
 
@@ -468,6 +672,48 @@ static void player_tick(SHGame *game, uint16_t pad, int race_started)
     update_lap(track, p);
 }
 
+#ifdef ENABLE_QA_HOOKS
+static void qa_route_tick(SHGame *game)
+{
+    SHTrackAssets assets;
+    SHPathPoint point;
+    SHCar *car = &game->player;
+    uint32_t target_x, target_y, old_x, old_y;
+    int32_t dx, dy, sx, sy, ax, ay, distance;
+    const int32_t speed = 3 << 19;
+    if (game->qa_route != 1) return;
+    sha_get_track(game->selected_track, &assets);
+    if (game->qa_route_point >= assets.path_count) {
+        game->qa_route = 2;
+        car->nlap = 1;
+        return;
+    }
+    sha_get_path(game->selected_track, game->qa_route_point, &point);
+    target_x = (point.x >> 1) + (1u << 30);
+    target_y = (point.y >> 1) + (1u << 30);
+    dx = (int32_t)(target_x - car->x);
+    dy = (int32_t)(target_y - car->y);
+    sx = dx >> 18; sy = dy >> 18;
+    ax = abs32(sx); ay = abs32(sy);
+    distance = (ax > ay ? ax : ay) + ((ax > ay ? ay : ax) >> 1);
+    if (distance <= (speed >> 18) + 1) {
+        car->x = target_x; car->y = target_y;
+        car->sector = (int8_t)sha_find_sector(&assets, car->sector, car->x, car->y);
+        ++game->qa_route_point;
+        return;
+    }
+    car->angle = sha_vector_angle(sx, -sy);
+    car->ma = car->movangle = car->angle;
+    car->v = car->slidspeed = speed;
+    car->sliding = 0;
+    car->slidcounter = 0;
+    old_x = car->x; old_y = car->y;
+    car->x += (uint32_t)mul30(speed, sha_cos30(car->angle));
+    car->y += (uint32_t)mul30(speed, sha_sin30(car->angle));
+    collide_with_wall(game, car, old_x, old_y);
+}
+#endif
+
 static void ai_tick(SHGame *game, SHCar *car)
 {
     const uint8_t track = game->selected_track;
@@ -479,8 +725,13 @@ static void ai_tick(SHGame *game, SHCar *car)
     car->angle = (uint16_t)(car->angle + muldiv(car->av, car->v, 1 << 22));
     car->x += (uint32_t)mul30(car->v, sha_cos30(car->angle));
     car->y += (uint32_t)mul30(car->v, sha_sin30(car->angle));
-    /* cars.c keeps AI on its PATH and does not run the player's sector-wall
-     * collision pass. Retaining that split saves four full boundary scans. */
+    {
+        SHTrackAssets assets;
+        sha_get_track(track, &assets);
+        car->sector = (int8_t)sha_find_sector(&assets, car->sector, car->x, car->y);
+    }
+    /* cars.c keeps AI on its PATH and does not run the player's rectangular
+     * boundary pass. It still tracks its current SEC polygon for topology. */
     update_lap(track, car);
 
     dx = (int32_t)((car->target_x >> 18) - (car->x >> 18));
@@ -602,10 +853,17 @@ static void simulation_tick(SHGame *game, uint16_t pad)
     }
     if (game->mode != SH_MODE_RACE) return;
     ++game->race_ticks;
-    player_tick(game, pad, 1);
+#ifdef ENABLE_QA_HOOKS
+    if (game->qa_route) qa_route_tick(game);
+    else
+#endif
+        player_tick(game, pad, 1);
     for (i = 0; i < SH_AI_CARS; ++i)
         ai_tick(game, &game->ai[i]);
-    collide_cars(game);
+#ifdef ENABLE_QA_HOOKS
+    if (!game->qa_route)
+#endif
+        collide_cars(game);
     update_effects(game);
     rank_cars(game);
     update_camera(game);
@@ -678,6 +936,18 @@ void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks)
     } else if (game->mode == SH_MODE_RACE && (pressed & SH_PAD_START))
         game->mode = SH_MODE_PAUSED;
 #ifdef ENABLE_QA_HOOKS
+    else if (game->mode == SH_MODE_RACE &&
+             (pad & (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_B)) ==
+             (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_B) &&
+             (pressed & SH_PAD_B)) {
+        /* Impossible D-pad chord: drive the authored PATH centreline through
+         * real rectangular collision for the Racer's Edge seam regression. */
+        game->qa_route = 1;
+        game->qa_route_point = 0;
+        game->qa_collision_point = 0xFFFFu;
+        game->collision_count = 0;
+        game->wall_collision_count = 0;
+    }
     else if (game->mode == SH_MODE_RACE &&
              (pad & (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_C)) ==
              (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_C) &&
