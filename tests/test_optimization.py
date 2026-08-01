@@ -78,6 +78,8 @@ assert constant("SHA_MAP0_SECTOR_SIDE_COUNT") == 308
 assert constant("SHA_MAP1_SECTOR_SIDE_COUNT") == 394
 assert "old_sector_data.side_count" in (root / "src/sh_game.c").read_text()
 assert "MAX_VISIBLE_SECTORS 20" in render
+assert "candidate_depth" in render and "candidate_index" in render
+assert "MAX_CANDIDATES" in render
 assert "build_visible_sectors" in render and "portal_may_be_visible" in render
 assert "cam->visible_wall_count" in render
 obstacle_loop = render[render.index("static uint16_t draw_obstacles"):

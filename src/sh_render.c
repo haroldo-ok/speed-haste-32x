@@ -395,6 +395,28 @@ static void draw_sprite_scaled(volatile uint8_t *fb, const SHSprite *sp,
     {
         int left = center_x - muldiv(sp->dx, width, sp->width);
         int top = base_y - muldiv(sp->dy, height, sp->height);
+        /* Fast path: fully on-screen, non-mirrored sprite. Drops the per-pixel
+         * dx/dy/mirror tests and the clamp for x+1/dy+1; the common case for
+         * trackside objects and particles. */
+        if (!mirror && left >= 0 && top >= VIEW_Y &&
+            left + width <= 320 && top + height <= VIEW_Y + VIEW_H) {
+            for (y = 0; y < height; y += 2, syfp += systep) {
+                int sy = (int)(syfp >> 16);
+                int dy = top + y;
+                uint32_t sxfp = 0;
+                uint8_t *row0 = (uint8_t *)fb + (uintptr_t)(dy * 320 + left);
+                uint8_t *row1 = row0 + 320;
+                for (x = 0; x < width; x += 2, sxfp += sxstep) {
+                    int sx = (int)(sxfp >> 16);
+                    uint8_t c = sp->pixels[sy * sp->width + sx];
+                    if (c) {
+                        row0[x] = c; row0[x + 1] = c;
+                        row1[x] = c; row1[x + 1] = c;
+                    }
+                }
+            }
+            return;
+        }
         for (y = 0; y < height; y += 2, syfp += systep) {
             int sy = (int)(syfp >> 16);
             int dy = top + y;
@@ -653,10 +675,15 @@ static void draw_race_cars(volatile uint8_t *fb, const Camera *cam, const SHGame
 
 typedef struct VisibleSprite { int32_t depth; int x, y, w, h; uint16_t id; } VisibleSprite;
 
+/* Obstacle candidate work list: collect cheap {depth,index} first, then
+ * project and draw only the MAX_VISIBLE nearest. */
+#define MAX_CANDIDATES 96
+
 static uint16_t draw_obstacles(volatile uint8_t *fb, const Camera *cam)
 {
-    VisibleSprite visible[MAX_VISIBLE];
     uint32_t candidate_mask[11] = {0}; /* enough for 325 shareware objects */
+    int32_t candidate_depth[MAX_CANDIDATES];
+    uint16_t candidate_index[MAX_CANDIDATES];
     int count = 0;
     int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
     uint16_t candidates = 0;
@@ -705,13 +732,12 @@ static uint16_t draw_obstacles(volatile uint8_t *fb, const Camera *cam)
     }
     for (i = 0; i < cam->assets.obstacle_count; ++i) {
         const uint8_t *record;
-        SHObstacle ob; SHSprite sp;
+        SHObstacle ob;
         int32_t relx, rely, depth, side;
-        int x, y, w, h;
         if (!(candidate_mask[i >> 5] & (1u << (i & 31u)))) continue;
         record = cam->assets.obstacles + (uint32_t)i * 12u;
         ob.x = sha_rd32(record); ob.y = sha_rd32(record + 4);
-        ob.angle = sha_rd16(record + 8); ob.sprite = sha_rd16(record + 10);
+        ob.sprite = sha_rd16(record + 10);
         relx = (int32_t)(ob.x - cam->x) >> 6;
         rely = (int32_t)(ob.y - cam->y) >> 6;
         if (abs32(relx) > (24 << 20) || abs32(rely) > (24 << 20)) continue;
@@ -719,26 +745,46 @@ static uint16_t draw_obstacles(volatile uint8_t *fb, const Camera *cam)
         if (depth < (4 << 14) || depth > (24 << 20)) continue;
         side = mul30(rely, ca) - mul30(relx, sa);
         if (abs32(side / 3) > depth) continue;
+        /* Collect only {depth,index} here; the expensive 3D projection and
+         * sprite fetch happen only for the MAX_VISIBLE nearest after sorting. */
+        if (count < MAX_CANDIDATES) {
+            candidate_depth[count] = depth;
+            candidate_index[count] = (uint16_t)i;
+            ++count;
+        }
+    }
+    /* Keep the nearest MAX_VISIBLE by insertion sort (descending depth). */
+    if (count > MAX_VISIBLE) count = MAX_VISIBLE;
+    for (i = 1; i < (unsigned)count; ++i) {
+        int32_t d = candidate_depth[i];
+        uint16_t idx = candidate_index[i];
+        unsigned j = i;
+        while (j && candidate_depth[j - 1] < d) {
+            candidate_depth[j] = candidate_depth[j - 1];
+            candidate_index[j] = candidate_index[j - 1];
+            --j;
+        }
+        candidate_depth[j] = d; candidate_index[j] = idx;
+    }
+    for (i = 0; i < (unsigned)count; ++i) {
+        const uint8_t *record;
+        SHObstacle ob; SHSprite sp;
+        int32_t relx, rely, side;
+        int x, y, w, h;
+        int32_t depth = candidate_depth[i];
+        record = cam->assets.obstacles + (uint32_t)candidate_index[i] * 12u;
+        ob.x = sha_rd32(record); ob.y = sha_rd32(record + 4);
+        ob.sprite = sha_rd16(record + 10);
+        relx = (int32_t)(ob.x - cam->x) >> 6;
+        rely = (int32_t)(ob.y - cam->y) >> 6;
+        side = mul30(rely, ca) - mul30(relx, sa);
         sha_get_sprite(ob.sprite, &sp);
         x = CX + muldiv(side >> 4, cam->focus, depth);
         y = PROJ_Y + muldiv(cam->height << 2, cam->focus, depth) - cam->horizon;
         w = muldiv((int32_t)sp.world_width, cam->focus, depth);
         h = muldiv((int32_t)sp.world_height, cam->focus, depth);
-        if (w <= 0 || h <= 0 || w > 200 || h > 200) continue;
-        if (count < MAX_VISIBLE) {
-            int k = count++;
-            visible[k].depth = depth; visible[k].x = x; visible[k].y = y;
-            visible[k].w = w; visible[k].h = h; visible[k].id = ob.sprite;
-        }
-    }
-    for (i = 1; i < (unsigned)count; ++i) {
-        VisibleSprite v = visible[i]; int j = (int)i;
-        while (j && visible[j-1].depth < v.depth) { visible[j] = visible[j-1]; --j; }
-        visible[j] = v;
-    }
-    for (i = 0; i < (unsigned)count; ++i) {
-        SHSprite sp; sha_get_sprite(visible[i].id, &sp);
-        draw_sprite_scaled(fb, &sp, visible[i].x, visible[i].y, visible[i].w, visible[i].h, 0);
+        if (w > 0 && h > 0 && w <= 200 && h <= 200)
+            draw_sprite_scaled(fb, &sp, x, y, w, h, 0);
     }
     return candidates;
 }
