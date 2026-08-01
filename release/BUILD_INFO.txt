@@ -1,47 +1,63 @@
-Speed Haste 32X — wall-release and crash-recovery correction
+Speed Haste 32X — SH-2 floor/panorama optimization milestone
 ============================================================
 ROM: SpeedHaste32X.32x
 Size: 2,621,440 bytes (2.5 MiB)
-SHA-256: bf9b16ec2ea9ec50c4f1a8bc5d3f4c6f12e94de42feee95aa544fc9cda9f1cfe
-Genesis checksum: 0x25A9
+SHA-256: 7dd0d314d0fbe3be3828f831e2a0ac09fd812d2c7d9941cb7e1a310a3dd06d9c
+Genesis checksum: 0xD97C
 MARS master entry: 0x06000240
 MARS slave entry: 0x06000244
 
 Toolchain: 32XDK 20220418 / GCC 12.1.0
 Emulator: PicoDrive libretro 78a662e3135871a6c657d5e61900f6704152e594
 
-Wall-collision correction
-- Previous centre now identifies the valid road side of each source wall
-- An embedded rollback point is depenetrated to a 36-unit release radius
-- Four-unit contact hysteresis prevents immediate reflection into the same wall
-- Outward and wall-tangential movement releases without another bounce
-- Original userctl.c slidcounter crash rotation and decay are active
-- Body steering remains active during crash recovery and powerslides
-- Integer square-root normalisation runs only after an actual narrow-phase hit
+SH-2 floor kernel
+- Hand-written SH-2 assembly processes all 80 samples in a row
+- Map, ROM/cached tile, shade and coordinate pointers stay in registers
+- Tile cache selection and 64x64 texel addressing occur in the kernel
+- Palette bytes are replicated into aligned packed 32-bit writes
+- Both 4x2-expanded framebuffer rows are emitted in one pass
+- Perspective, row stepping and shade-row selection remain outside the loop
 
-Source-backed collision/effect systems retained
-- 76 MAP00 and 123 MAP01 source-derived collision wall sides
-- Wall-angle reflection, RPM loss, car-to-car separation and 7/8 momentum response
-- Original six-frame sparks, three ground-smoke families and persistent skid marks
+Dual-SH-2 profiling
+- Independent /8192 watchdog timers run on master and slave
+- Panorama, slave floor and synchronization wait are measured separately
+- Sample: panorama 44 ticks, slave floor 53 ticks, wait 9 ticks
+- Master critical path totals 139 ticks:
+  visibility 3, panorama 44, wait 9, walls 25,
+  objects 35, cars/effects 7, HUD 16
 
-D32XR-inspired optimization retained
-- SH7604 hardware 32/32 and 64/32 divider helpers
-- Frequency-sorted 28-tile aligned SDRAM cache
-- Cache coverage: Racer's Edge 95%, The City 92%
-- Cached map, panorama, mountain and 8 KiB shade table
-- Build-time SEC_TOMAP conversion
-- Wall DDA steps outside X loops; 2x2 low-detail writes
-- Master/slave SH-2 rendering; independent 70 Hz simulation
+Packed panorama
+- Sky and mountain rows process four pixels per aligned 32-bit write
+- Only one four-pixel group per row can take the seam-wrap slow path
+- Mixed transparent mountain groups retain byte-level compositing
+- Original panorama/mountain pixels and horizontal behavior are retained
+
+Default-sector object bins
+- Original default objects remain source-visible but use 16x16 world bins
+- MAP00: 126 objects across 17 non-empty bins
+- MAP01: 116 objects across 23 non-empty bins
+- Conservative expanded bin/frustum tests run before object access
+- City stress candidates reduced from 175 to 89 (325 total objects)
+- Source-order candidate mask preserves painter behavior
+
+Rendering work retained
+- Source-style traversal: 20 visible sectors and 18/123 City walls
+- D32XR divider, wall DDA, aligned SDRAM caches and portal filtering
+- BSS end 0x0602E7F0, below master stack near 0x0603F000
+
+Racer's Edge correction retained
+- Unsigned wrapped walls/corners prevent phantom seam barriers
+- Automated route completes all 88 PATH points in 2,902 VBlanks
+- Collision point remains 0xFFFF (none)
 
 Verification: PASS
-- Content, projection/forward-flow, collision, optimization and ROM tests
-- PicoDrive The City + Stock point-to-point E2E
-- Dedicated source-wall hit followed by opposite-steering escape
-- 53 encoded world-position changes while driving away
-- Impact-to-recovery framebuffer delta: 149,535 RGB bytes
-- Black/frozen-screen checks at 16 capture points
-- 120 frames / 600 VBlanks = 12.0 fps
-- Acceleration changed 103,292 RGB bytes
-- Steering/collision changed 143,632 RGB bytes
+- Asset/bin integrity, topology, projection, collision, optimization and ROM tests
+- PicoDrive City/Stock point-to-point plus complete Racer's Edge route
+- Black/frozen-screen checks at 17 capture points
+- 150 frames / 600 VBlanks = 15.0 fps (previous milestone: 12.7 fps)
+- Independent 70 Hz simulation
+- Acceleration changed 104,257 RGB bytes
+- Steering/collision changed 131,396 RGB bytes
+- Wall recovery produced 68 position changes and 140,113 changed RGB bytes
 
 Detailed report: ../test-results/emulator/report.json

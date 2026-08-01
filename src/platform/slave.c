@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "mars.h"
+#include "platform.h"
 #include "../sh_render_worker.h"
 
 /* Function called from the SH-2 startup code on the secondary processor. */
@@ -21,6 +22,7 @@ void slave(void)
     }
 #elif defined(ENABLE_DUAL_SH2_RENDER)
     /* Render the perspective floor while the master draws the panorama. */
+    platform_profile_timer_init();
     MARS_SYS_COMM6 = SH_SLAVE_IDLE;
     for (;;) {
         while (MARS_SYS_COMM6 != SH_SLAVE_DRAW_FLOOR) { }

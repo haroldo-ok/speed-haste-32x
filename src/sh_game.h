@@ -62,7 +62,8 @@ typedef struct SHCar {
     uint16_t tirerot, tiredir;
     uint8_t gear, automatic, model, car_type;
     uint8_t position, nlap, npoint, finished;
-    uint8_t sliding, reserved;
+    uint8_t sliding;
+    int8_t sector;
     uint16_t best_lap, max_speed;
     uint32_t lap_time, total_time;
 
@@ -77,13 +78,15 @@ typedef struct SHCar {
 typedef struct SHGame {
     uint8_t mode, camera, hud, menu_page;
     uint8_t selected_car, selected_track, car_type, menu_latched;
-    uint8_t menu_release, reserved;
+    uint8_t menu_release, qa_route;
     uint16_t previous_pad;
     uint16_t camera_angle;
     uint16_t countdown;
     uint16_t sim_accumulator;
     uint16_t collision_count;
     uint16_t wall_collision_count;
+    uint16_t qa_route_point;
+    uint16_t qa_collision_point;
     uint32_t frame;
     uint32_t race_ticks;
     SHCar player;

@@ -21,6 +21,16 @@
 #define PROJ_Y (VIEW_Y + SKY_H)
 #define SCREEN_CY (VIEW_Y + VIEW_H / 2)
 #define MAX_VISIBLE 16
+#define MAX_VISIBLE_SECTORS 20
+#define MAX_VISIBLE_WALLS 128
+
+typedef struct SHRenderProfile {
+    uint16_t visibility, panorama, floor_slave, floor_wait;
+    uint16_t walls, obstacles, cars_effects, hud, total;
+    uint16_t sector_count, wall_count, object_candidates;
+} SHRenderProfile;
+
+static SHRenderProfile render_profile;
 
 static int32_t abs32(int32_t v) { return v < 0 ? -v : v; }
 static int32_t mul30(int32_t a, int32_t b) { return (int32_t)(((int64_t)a * b) >> 30); }
@@ -70,6 +80,9 @@ typedef struct Camera {
     int32_t radius;
     int32_t height, focus, horizon;
     uint8_t cockpit, track;
+    uint8_t visible_sector_count, visible_wall_count;
+    int16_t visible_sectors[MAX_VISIBLE_SECTORS];
+    uint16_t visible_walls[MAX_VISIBLE_WALLS];
     SHTrackAssets assets;
 } Camera;
 
@@ -132,31 +145,146 @@ static void make_camera(const SHGame *game, Camera *cam)
     cam->y = p->y - (uint32_t)mul30(cam->radius, sha_sin30(cam->angle));
 }
 
+static int portal_may_be_visible(const Camera *cam, const SHSectorSide *side)
+{
+    SHSectorVertex v0, v1;
+    int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
+    int32_t x0, y0, x1, y1, d0, d1, s0, s1;
+    sha_get_sector_vertex(&cam->assets, side->v0, &v0);
+    sha_get_sector_vertex(&cam->assets, side->v1, &v1);
+    x0 = (int32_t)((((uint32_t)v0.x << 15) + 0x40000000u) - cam->x) >> 6;
+    y0 = (int32_t)((((uint32_t)v0.y << 15) + 0x40000000u) - cam->y) >> 6;
+    x1 = (int32_t)((((uint32_t)v1.x << 15) + 0x40000000u) - cam->x) >> 6;
+    y1 = (int32_t)((((uint32_t)v1.y << 15) + 0x40000000u) - cam->y) >> 6;
+    d0 = mul30(x0, ca) + mul30(y0, sa);
+    d1 = mul30(x1, ca) + mul30(y1, sa);
+    if (d0 < (8 << 12) && d1 < (8 << 12)) return 0;
+    s0 = mul30(y0, ca) - mul30(x0, sa);
+    s1 = mul30(y1, ca) - mul30(x1, sa);
+    /* Conservative 120-degree portal cone. A side with one endpoint behind
+     * remains eligible, avoiding holes at bends and near the chase camera. */
+    if (d0 > 0 && d1 > 0 && s0 < -(d0 << 1) && s1 < -(d1 << 1)) return 0;
+    if (d0 > 0 && d1 > 0 && s0 >  (d0 << 1) && s1 >  (d1 << 1)) return 0;
+    return 1;
+}
+
+static void build_visible_sectors(const SHGame *game, Camera *cam)
+{
+    uint32_t seen_sectors[3] = {0, 0, 0};
+    uint32_t seen_walls[4] = {0, 0, 0, 0};
+    int16_t start = sha_find_sector(&cam->assets, game->player.sector,
+                                    cam->x, cam->y);
+    unsigned head = 0, i;
+    cam->visible_sector_count = 0;
+    cam->visible_wall_count = 0;
+    if (start < 0) start = game->player.sector;
+    if (start < 0 || (uint16_t)start >= cam->assets.sector_count) return;
+    cam->visible_sectors[cam->visible_sector_count++] = start;
+    seen_sectors[(uint16_t)start >> 5] |= 1u << ((uint16_t)start & 31u);
+
+    /* sectors.c::SEC_Render performs a bounded breadth-first adjacency walk.
+     * Retain that source convention and add a conservative portal cone. */
+    while (head < cam->visible_sector_count &&
+           cam->visible_sector_count < MAX_VISIBLE_SECTORS) {
+        SHSector sector;
+        int16_t sector_id = cam->visible_sectors[head++];
+        sha_get_sector(&cam->assets, (uint16_t)sector_id, &sector);
+        for (i = 0; i < sector.side_count; ++i) {
+            SHSectorSide side;
+            sha_get_sector_side(&cam->assets, sector.first_side + i, &side);
+            if (side.wall != 0xFFFFu && side.wall < cam->assets.wall_count &&
+                !(seen_walls[side.wall >> 5] & (1u << (side.wall & 31u)))) {
+                seen_walls[side.wall >> 5] |= 1u << (side.wall & 31u);
+                if (cam->visible_wall_count < MAX_VISIBLE_WALLS)
+                    cam->visible_walls[cam->visible_wall_count++] = side.wall;
+            }
+            if (side.other >= 0 && (uint16_t)side.other < cam->assets.sector_count &&
+                !(seen_sectors[(uint16_t)side.other >> 5] &
+                  (1u << ((uint16_t)side.other & 31u))) &&
+                portal_may_be_visible(cam, &side)) {
+                seen_sectors[(uint16_t)side.other >> 5] |=
+                    1u << ((uint16_t)side.other & 31u);
+                cam->visible_sectors[cam->visible_sector_count++] = side.other;
+                if (cam->visible_sector_count >= MAX_VISIBLE_SECTORS) break;
+            }
+        }
+    }
+
+    /* Preserve the old global-wall order to avoid changing painter overlap. */
+    for (i = 1; i < cam->visible_wall_count; ++i) {
+        uint16_t wall = cam->visible_walls[i];
+        unsigned j = i;
+        while (j && cam->visible_walls[j - 1] > wall) {
+            cam->visible_walls[j] = cam->visible_walls[j - 1];
+            --j;
+        }
+        cam->visible_walls[j] = wall;
+    }
+}
+
 static void draw_background(volatile uint8_t *fb, const Camera *cam)
 {
     const uint8_t *sky = cam->assets.sky;
     const uint8_t *mountains = cam->assets.mountains;
     const int sky_h = SKY_H;
     const int mountain_h = cam->track ? 35 : 49;
-    int offset = ((uint32_t)3 * cam->angle * 320u / 65536u) % 320;
+    int offset = (int)(((uint32_t)3 * cam->angle * 320u) >> 16);
     int y, x;
+    while (offset >= 320) offset -= 320;
     for (y = 0; y < sky_h; ++y) {
         const uint8_t *src = sky + y * 320;
-        volatile uint16_t *dst = (volatile uint16_t *)(fb + (VIEW_Y + y) * 320);
-        for (x = 0; x < 320; x += 2) {
-            int sx0 = x + 320 - offset;
-            int sx1;
-            if (sx0 >= 320) sx0 -= 320;
-            sx1 = sx0 + 1; if (sx1 == 320) sx1 = 0;
-            dst[x >> 1] = (uint16_t)((src[sx0] << 8) | src[sx1]);
+        volatile uint32_t *dst = (volatile uint32_t *)(fb + (VIEW_Y + y) * 320);
+        int sx = 320 - offset;
+        if (sx == 320) sx = 0;
+        /* Four pixels per aligned write. Only one group per row can straddle
+         * the panorama seam; all other groups read four contiguous bytes. */
+        for (x = 0; x < 80; ++x) {
+            uint32_t pattern;
+            if (sx <= 316) {
+                pattern = ((uint32_t)src[sx] << 24) |
+                          ((uint32_t)src[sx + 1] << 16) |
+                          ((uint32_t)src[sx + 2] << 8) | src[sx + 3];
+                sx += 4;
+                if (sx == 320) sx = 0;
+            } else {
+                uint8_t c0 = src[sx]; if (++sx == 320) sx = 0;
+                uint8_t c1 = src[sx]; if (++sx == 320) sx = 0;
+                uint8_t c2 = src[sx]; if (++sx == 320) sx = 0;
+                uint8_t c3 = src[sx]; if (++sx == 320) sx = 0;
+                pattern = ((uint32_t)c0 << 24) | ((uint32_t)c1 << 16) |
+                          ((uint32_t)c2 << 8) | c3;
+            }
+            dst[x] = pattern;
         }
     }
     for (y = 0; y < mountain_h; ++y) {
         const uint8_t *src = mountains + y * 320;
-        int yy = VIEW_Y + sky_h - mountain_h + y;
-        for (x = 0; x < 320; ++x) {
-            uint8_t c = src[(x + 320 - offset) % 320];
-            if (c) fb[yy * 320 + x] = c;
+        volatile uint8_t *dst8 = fb + (VIEW_Y + sky_h - mountain_h + y) * 320;
+        volatile uint32_t *dst32 = (volatile uint32_t *)dst8;
+        int sx = 320 - offset;
+        if (sx == 320) sx = 0;
+        for (x = 0; x < 80; ++x) {
+            uint8_t c0, c1, c2, c3;
+            if (sx <= 316) {
+                c0 = src[sx]; c1 = src[sx + 1];
+                c2 = src[sx + 2]; c3 = src[sx + 3];
+                sx += 4; if (sx == 320) sx = 0;
+            } else {
+                c0 = src[sx]; if (++sx == 320) sx = 0;
+                c1 = src[sx]; if (++sx == 320) sx = 0;
+                c2 = src[sx]; if (++sx == 320) sx = 0;
+                c3 = src[sx]; if (++sx == 320) sx = 0;
+            }
+            if (c0 && c1 && c2 && c3) {
+                dst32[x] = ((uint32_t)c0 << 24) | ((uint32_t)c1 << 16) |
+                           ((uint32_t)c2 << 8) | c3;
+            } else {
+                int px = x << 2;
+                if (c0) dst8[px] = c0;
+                if (c1) dst8[px + 1] = c1;
+                if (c2) dst8[px + 2] = c2;
+                if (c3) dst8[px + 3] = c3;
+            }
         }
     }
 }
@@ -169,7 +297,12 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
     const uint8_t *cached_tiles = cam->assets.cached_tiles;
     const uint16_t cached_count = cam->assets.cached_tile_count;
     const int floor_y = PROJ_Y;
+    SH2FloorRowJob floor_job;
     int row;
+    floor_job.map = map;
+    floor_job.tiles = tiles;
+    floor_job.cached_tiles = cached_tiles;
+    floor_job.cached_count = cached_count;
     /* The 32X cartridge bus is shared by both SH-2s. Render the floor at
      * 80x65 samples and expand 4x2, matching the chunky low-detail option of
      * the DOS game while reducing ROM tile fetches by eight. */
@@ -178,7 +311,6 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
         int32_t radius = muldiv(cam->height, cam->focus, Y);
         int level;
         int32_t step_x, step_y, pos_x, pos_y;
-        int x;
         if (radius < (4 << 16)) level = 15;
         else if (radius >= (36 << 16)) level = 0;
         else level = 14 - (int)(((int64_t)14 * (radius - (4 << 16)) / 32) >> 16);
@@ -195,25 +327,21 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
         pos_y += step_y + step_y;
         step_x <<= 2;
         step_y <<= 2;
-        for (x = 0; x < 320; x += 4) {
-            uint8_t color = floor_pixel(map, tiles, cached_tiles, cached_count,
-                                        (uint32_t)pos_x, (uint32_t)pos_y);
-            uint8_t shaded = translation[(31 - level) * 256 + color];
-            volatile uint32_t *p0 = (volatile uint32_t *)(fb + (floor_y + row) * 320 + x);
-            volatile uint32_t *p1 = (volatile uint32_t *)((volatile uint8_t *)p0 + 320);
-            uint32_t pattern = (uint32_t)shaded * 0x01010101u;
-            *p0 = pattern;
-            if (floor_y + row + 1 < VIEW_Y + VIEW_H)
-                *p1 = pattern;
-            pos_x += step_x;
-            pos_y += step_y;
-        }
+        floor_job.dst0 = (volatile uint32_t *)(fb + (floor_y + row) * 320);
+        floor_job.dst1 = (volatile uint32_t *)(fb + (floor_y + row + 1) * 320);
+        floor_job.shade = translation + ((31 - level) << 8);
+        floor_job.pos_x = (uint32_t)pos_x;
+        floor_job.pos_y = (uint32_t)pos_y;
+        floor_job.step_x = step_x;
+        floor_job.step_y = step_y;
+        sh2_floor_row(&floor_job);
     }
 }
 
-void sh_render_slave_floor(const volatile SHFloorJob *job)
+void sh_render_slave_floor(volatile SHFloorJob *job)
 {
     Camera cam;
+    uint8_t stamp = platform_profile_ticks();
     cam.x = job->camera_x;
     cam.y = job->camera_y;
     cam.angle = job->angle;
@@ -231,6 +359,7 @@ void sh_render_slave_floor(const volatile SHFloorJob *job)
     cam.assets.cached_tiles = job->cached_tiles;
     cam.assets.cached_tile_count = job->cached_tile_count;
     draw_floor(job->framebuffer, &cam);
+    job->profile_ticks = (uint8_t)(platform_profile_ticks() - stamp);
 }
 
 #ifdef ENABLE_DUAL_SH2_RENDER
@@ -250,13 +379,17 @@ static void start_slave_floor(volatile uint8_t *fb, const Camera *cam)
     job->height = cam->height;
     job->focus = cam->focus;
     job->horizon = cam->horizon;
+    job->profile_ticks = 0;
     MARS_SYS_COMM6 = SH_SLAVE_DRAW_FLOOR;
 }
 
-static void wait_slave_floor(void)
+static uint16_t wait_slave_floor(void)
 {
+    uint16_t ticks;
     while (MARS_SYS_COMM6 != SH_SLAVE_FLOOR_DONE) { }
+    ticks = SH_FLOOR_JOB->profile_ticks;
     MARS_SYS_COMM6 = SH_SLAVE_IDLE;
+    return ticks;
 }
 #endif
 
@@ -519,22 +652,67 @@ static void draw_race_cars(volatile uint8_t *fb, const Camera *cam, const SHGame
 
 typedef struct VisibleSprite { int32_t depth; int x, y, w, h; uint16_t id; } VisibleSprite;
 
-static void draw_obstacles(volatile uint8_t *fb, const Camera *cam)
+static uint16_t draw_obstacles(volatile uint8_t *fb, const Camera *cam)
 {
     VisibleSprite visible[MAX_VISIBLE];
+    uint32_t candidate_mask[11] = {0}; /* enough for 325 shareware objects */
     int count = 0;
     int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
-    const uint8_t *record = cam->assets.obstacles;
-    unsigned i;
-    for (i = 0; i < cam->assets.obstacle_count; ++i, record += 12) {
+    uint16_t candidates = 0;
+    unsigned bucket_index, i;
+
+    /* Mark explicit visible-sector ranges first. */
+    for (bucket_index = 0; bucket_index < cam->visible_sector_count; ++bucket_index) {
+        SHSectorObjectRange range;
+        uint16_t bucket = (uint16_t)cam->visible_sectors[bucket_index];
+        sha_get_sector_object_range(&cam->assets, bucket, &range);
+        candidates = (uint16_t)(candidates + range.count);
+        for (i = 0; i < range.count; ++i) {
+            uint16_t id = sha_get_sector_object_index(
+                &cam->assets, (uint16_t)(range.first + i));
+            candidate_mask[id >> 5] |= 1u << (id & 31u);
+        }
+    }
+
+    /* SEC_Render always includes its implicit default sector. Preserve that
+     * content, but spatially reject its empty/distant 16x16 world bins before
+     * touching individual object records. Bin bounds are expanded so large
+     * landmarks cannot pop at the 24-unit draw boundary. */
+    for (bucket_index = 0; bucket_index < 256; ++bucket_index) {
+        SHSectorObjectRange range;
+        uint32_t center_x, center_y;
+        int32_t relx, rely, depth, side;
+        const int32_t margin = 3 << 20;
+        sha_get_default_object_bin_range(&cam->assets, (uint16_t)bucket_index, &range);
+        if (!range.count) continue;
+        center_x = ((uint32_t)(bucket_index & 15u) << 28) + (1u << 27);
+        center_y = ((uint32_t)(bucket_index >> 4) << 28) + (1u << 27);
+        relx = (int32_t)(center_x - cam->x) >> 6;
+        rely = (int32_t)(center_y - cam->y) >> 6;
+        if (abs32(relx) > (24 << 20) + margin ||
+            abs32(rely) > (24 << 20) + margin) continue;
+        depth = mul30(relx, ca) + mul30(rely, sa);
+        if (depth < -margin || depth > (24 << 20) + margin) continue;
+        side = mul30(rely, ca) - mul30(relx, sa);
+        if (depth > 0 && abs32(side) > depth * 3 + margin * 4) continue;
+        candidates = (uint16_t)(candidates + range.count);
+        for (i = 0; i < range.count; ++i) {
+            uint16_t id = sha_get_default_object_bin_index(
+                &cam->assets, (uint16_t)(range.first + i));
+            candidate_mask[id >> 5] |= 1u << (id & 31u);
+        }
+    }
+    for (i = 0; i < cam->assets.obstacle_count; ++i) {
+        const uint8_t *record;
         SHObstacle ob; SHSprite sp;
         int32_t relx, rely, depth, side;
         int x, y, w, h;
+        if (!(candidate_mask[i >> 5] & (1u << (i & 31u)))) continue;
+        record = cam->assets.obstacles + (uint32_t)i * 12u;
         ob.x = sha_rd32(record); ob.y = sha_rd32(record + 4);
         ob.angle = sha_rd16(record + 8); ob.sprite = sha_rd16(record + 10);
         relx = (int32_t)(ob.x - cam->x) >> 6;
         rely = (int32_t)(ob.y - cam->y) >> 6;
-        /* Reject most of the 263 decorations before any fixed-point multiplies. */
         if (abs32(relx) > (24 << 20) || abs32(rely) > (24 << 20)) continue;
         depth = mul30(relx, ca) + mul30(rely, sa);
         if (depth < (4 << 14) || depth > (24 << 20)) continue;
@@ -553,7 +731,7 @@ static void draw_obstacles(volatile uint8_t *fb, const Camera *cam)
         }
     }
     for (i = 1; i < (unsigned)count; ++i) {
-        VisibleSprite v = visible[i]; int j = i;
+        VisibleSprite v = visible[i]; int j = (int)i;
         while (j && visible[j-1].depth < v.depth) { visible[j] = visible[j-1]; --j; }
         visible[j] = v;
     }
@@ -561,6 +739,7 @@ static void draw_obstacles(volatile uint8_t *fb, const Camera *cam)
         SHSprite sp; sha_get_sprite(visible[i].id, &sp);
         draw_sprite_scaled(fb, &sp, visible[i].x, visible[i].y, visible[i].w, visible[i].h, 0);
     }
+    return candidates;
 }
 
 static void draw_effects(volatile uint8_t *fb, const Camera *cam, const SHGame *game)
@@ -618,9 +797,10 @@ static void draw_effects(volatile uint8_t *fb, const Camera *cam, const SHGame *
 static void draw_walls(volatile uint8_t *fb, const Camera *cam)
 {
     int32_t ca = sha_cos30(cam->angle), sa = sha_sin30(cam->angle);
-    const uint8_t *record = cam->assets.walls;
     unsigned i;
-    for (i = 0; i < cam->assets.wall_count; ++i, record += 20) {
+    for (i = 0; i < cam->visible_wall_count; ++i) {
+        const uint8_t *record = cam->assets.walls +
+                                (uint32_t)cam->visible_walls[i] * 20u;
         SHWall wall; SHSprite tex;
         uint32_t wx0, wy0, wx1, wy1;
         int32_t x0, y0, x1, y1, rx0, rz0, rx1, rz1;
@@ -779,27 +959,49 @@ static void draw_hud(volatile uint8_t *fb, const SHGame *game, const Camera *cam
 static void render_race(volatile uint8_t *fb, const SHGame *game)
 {
     Camera cam;
+    uint8_t stamp = platform_profile_ticks();
+    uint8_t next;
+    render_profile.object_candidates = 0;
     make_camera(game,&cam);
+    build_visible_sectors(game, &cam);
+    next = platform_profile_ticks();
+    render_profile.visibility = (uint8_t)(next - stamp); stamp = next;
 #ifdef ENABLE_DUAL_SH2_RENDER
     start_slave_floor(fb, &cam);
     draw_background(fb,&cam);
-    wait_slave_floor();
+    next = platform_profile_ticks();
+    render_profile.panorama = (uint8_t)(next - stamp); stamp = next;
+    render_profile.floor_slave = wait_slave_floor();
+    next = platform_profile_ticks();
+    render_profile.floor_wait = (uint8_t)(next - stamp); stamp = next;
 #else
     draw_background(fb,&cam);
+    next = platform_profile_ticks();
+    render_profile.panorama = (uint8_t)(next - stamp); stamp = next;
     draw_floor(fb,&cam);
+    next = platform_profile_ticks();
+    render_profile.floor_slave = (uint8_t)(next - stamp);
+    render_profile.floor_wait = render_profile.floor_slave;
+    stamp = next;
 #endif
 #ifndef SH_RENDER_FLOOR_ONLY
 #ifndef SH_NO_WALLS
     draw_walls(fb,&cam);
 #endif
+    next = platform_profile_ticks();
+    render_profile.walls = (uint8_t)(next - stamp); stamp = next;
 #ifndef SH_NO_OBSTACLES
-    draw_obstacles(fb,&cam);
+    render_profile.object_candidates = draw_obstacles(fb,&cam);
 #endif
+    next = platform_profile_ticks();
+    render_profile.obstacles = (uint8_t)(next - stamp); stamp = next;
     draw_effects(fb, &cam, game);
 #ifndef SH_NO_MODELS
     draw_race_cars(fb, &cam, game);
 #endif
 #endif
+    next = platform_profile_ticks();
+    render_profile.cars_effects = (uint8_t)(next - stamp); stamp = next;
 #ifndef SH_NO_HUD
     if(game->hud)draw_hud(fb,game,&cam);
 #endif
@@ -810,6 +1012,15 @@ static void render_race(volatile uint8_t *fb, const SHGame *game)
     }
     if(game->mode==SH_MODE_PAUSED)draw_sprite_centered(fb,SHSPR_PAUSE_IS2,CX,SCREEN_CY-35);
     if(game->mode==SH_MODE_FINISHED)draw_sprite_centered(fb,game->player.position==1?SHSPR_YOUWIN_IS2:SHSPR_ENDRACE_IS2,CX,SCREEN_CY-35);
+    next = platform_profile_ticks();
+    render_profile.hud = (uint8_t)(next - stamp);
+    /* Slave floor overlaps panorama; total is elapsed master critical path. */
+    render_profile.total = render_profile.visibility + render_profile.panorama +
+                           render_profile.floor_wait + render_profile.walls +
+                           render_profile.obstacles + render_profile.cars_effects +
+                           render_profile.hud;
+    render_profile.sector_count = cam.visible_sector_count;
+    render_profile.wall_count = cam.visible_wall_count;
 }
 
 static void draw_menu_background(volatile uint8_t *fb, uint32_t offset)
@@ -886,6 +1097,30 @@ static void draw_menu(volatile uint8_t *fb, const SHGame *game)
     }
 }
 
+static void write_profile_word(volatile uint8_t *fb, int x, int y, uint16_t value)
+{
+    fb[y * 320 + x + 0] = (uint8_t)(224u + ((value >> 12) & 15u));
+    fb[y * 320 + x + 1] = (uint8_t)(224u + ((value >> 8) & 15u));
+    fb[y * 320 + x + 2] = (uint8_t)(224u + ((value >> 4) & 15u));
+    fb[y * 320 + x + 3] = (uint8_t)(224u + (value & 15u));
+}
+
+static void write_profile_probes(volatile uint8_t *fb)
+{
+    unsigned i;
+    const uint16_t phases[9] = {
+        render_profile.visibility, render_profile.panorama,
+        render_profile.floor_slave, render_profile.floor_wait,
+        render_profile.walls, render_profile.obstacles,
+        render_profile.cars_effects, render_profile.hud, render_profile.total
+    };
+    for (i = 0; i < 16; ++i) fb[223 * 320 + 288 + i] = (uint8_t)(224u + i);
+    for (i = 0; i < 9; ++i) write_profile_word(fb, 272 + (int)i * 4, 222, phases[i]);
+    write_profile_word(fb, 296, 221, render_profile.sector_count);
+    write_profile_word(fb, 300, 221, render_profile.wall_count);
+    write_profile_word(fb, 304, 221, render_profile.object_candidates);
+}
+
 void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
 {
     static uint8_t title_palette=255;
@@ -904,8 +1139,13 @@ void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
         rect(fb, 0, VIEW_Y + VIEW_H, 320, 224 - VIEW_Y - VIEW_H, 0);
         render_race(fb,game);
     }
-    /* Overscan probes expose wall/general collisions, world movement, camera,
-     * state and heartbeat to the PicoDrive point-to-point test. */
+    /* Overscan probes expose render phases/counts plus collision, movement,
+     * camera, state and heartbeat to the PicoDrive point-to-point test. */
+    write_profile_probes(fb);
+    write_profile_word(fb, 308, 221, game->qa_route_point);
+    write_profile_word(fb, 308, 220, game->qa_collision_point);
+    fb[223 * 320 + 311] = game->qa_route ? 96 : 0;
+    fb[223 * 320 + 312] = game->qa_route == 2 ? 96 : 0;
     fb[223 * 320 + 313] = game->wall_collision_count ? 96 : 0;
     fb[223 * 320 + 314] = (uint8_t)(224 + ((game->player.x >> 20) & 15u));
     fb[223 * 320 + 315] = (uint8_t)(224 + ((game->player.y >> 20) & 15u));

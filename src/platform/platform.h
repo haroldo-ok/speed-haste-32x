@@ -13,5 +13,7 @@ uint16_t platform_read_pad(void);
 void platform_set_engine_pitch(uint16_t pitch);
 void platform_set_vga_palette(const uint8_t *vga_rgb);
 uint32_t platform_vblank_count(void);
+void platform_profile_timer_init(void);
+uint8_t platform_profile_ticks(void);
 
 #endif

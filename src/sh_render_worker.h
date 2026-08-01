@@ -17,8 +17,10 @@ typedef struct SHFloorJob {
     uint8_t track;
     uint8_t cached_tile_count;
     int32_t height, focus, horizon;
+    volatile uint16_t profile_ticks;
+    uint16_t reserved;
 } SHFloorJob;
 
-void sh_render_slave_floor(const volatile SHFloorJob *job);
+void sh_render_slave_floor(volatile SHFloorJob *job);
 
 #endif

@@ -23,6 +23,21 @@ typedef struct SHWall {
 
 enum { SH_WALL_COLLIDABLE = 0x0001 };
 
+typedef struct SHSector {
+    uint16_t first_side;
+    uint8_t side_count, flags;
+    uint16_t min_x, min_y, max_x, max_y;
+} SHSector;
+
+typedef struct SHSectorSide {
+    uint16_t v0, v1;
+    int16_t other;
+    uint16_t wall;
+} SHSectorSide;
+
+typedef struct SHSectorVertex { uint16_t x, y; } SHSectorVertex;
+typedef struct SHSectorObjectRange { uint16_t first, count; } SHSectorObjectRange;
+
 typedef struct SHStaticCamera {
     uint32_t x, y, height;
 } SHStaticCamera;
@@ -47,10 +62,19 @@ typedef struct SHTrackAssets {
     const uint8_t *starts;
     const uint8_t *cameras;
     const uint8_t *walls;
+    const uint8_t *sector_vertices;
+    const uint8_t *sectors;
+    const uint8_t *sector_sides;
+    const uint8_t *sector_object_meta;
+    const uint8_t *sector_object_indices;
+    const uint8_t *default_object_bin_meta;
+    const uint8_t *default_object_bin_indices;
     const uint8_t *obstacles;
     uint16_t tile_count, cached_tile_count;
     uint16_t path_count, start_count;
     uint16_t camera_count, wall_count, obstacle_count;
+    uint16_t sector_vertex_count, sector_count, sector_side_count;
+    uint16_t sector_object_bucket_count;
 } SHTrackAssets;
 
 uint16_t sha_rd16(const uint8_t *p);
@@ -67,6 +91,19 @@ void sha_get_sprite(uint16_t id, SHSprite *out);
 void sha_get_path(uint8_t track, uint16_t id, SHPathPoint *out);
 void sha_get_camera(uint8_t track, uint16_t id, SHStaticCamera *out);
 void sha_get_wall(uint8_t track, uint16_t id, SHWall *out);
+void sha_get_sector(const SHTrackAssets *assets, uint16_t id, SHSector *out);
+void sha_get_sector_side(const SHTrackAssets *assets, uint16_t id, SHSectorSide *out);
+void sha_get_sector_vertex(const SHTrackAssets *assets, uint16_t id, SHSectorVertex *out);
+void sha_get_sector_object_range(const SHTrackAssets *assets, uint16_t sector,
+                                 SHSectorObjectRange *out);
+uint16_t sha_get_sector_object_index(const SHTrackAssets *assets, uint16_t id);
+void sha_get_default_object_bin_range(const SHTrackAssets *assets, uint16_t bin,
+                                      SHSectorObjectRange *out);
+uint16_t sha_get_default_object_bin_index(const SHTrackAssets *assets, uint16_t id);
+int sha_sector_contains(const SHTrackAssets *assets, int16_t sector,
+                        uint32_t world_x, uint32_t world_y);
+int16_t sha_find_sector(const SHTrackAssets *assets, int16_t hint,
+                        uint32_t world_x, uint32_t world_y);
 void sha_get_obstacle(uint8_t track, uint16_t id, SHObstacle *out);
 void sha_get_model(uint8_t car_type, uint16_t id, SHModel *out);
 

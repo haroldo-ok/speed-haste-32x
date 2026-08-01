@@ -11,6 +11,8 @@ This revision ports both circuits and vehicle classes from the original sharewar
 - original class-specific cockpits, tachometers and maximum speeds;
 - Stock powersliding behavior derived from `userctl.c`;
 - original 64×64 floor tiles, rotations, PATH points, walls and track objects;
+- complete `MAP00.SEC`/`MAP01.SEC` polygon topology: vertices, flags, side adjacency and wall links;
+- sector-assigned scenery and source-style bounded visible-sector traversal;
 - original floor-casting equations from `3dfloor.c`/`fla.asm`;
 - one shared `hsk+y` projection origin for ground, walls, objects and cars;
 - original chase-camera 1/16 angular lag and correct rear/front model orientation;
@@ -20,10 +22,12 @@ This revision ports both circuits and vehicle classes from the original sharewar
 - multi-step setup flow for circuit, class and individual car selection;
 - countdown, lap/position HUD, chase/cockpit/high/trackside-TV cameras, pause and finish states;
 - PATH-driven computer racers based on `cars.c` and `racemap.c`;
-- source-backed guardrail and car-to-car collision response, including wall-release hysteresis and the original crash-recovery phase;
+- sector-local guardrail physics with the original asymmetric rectangular player bounds, swept-corner anti-tunnelling, wall-release hysteresis and crash recovery;
+- wrapped wall/rectangle coordinates across `0x80000000`, fixing Racer's Edge's phantom backwards-pushing barrier;
+- source-backed car-to-car collision response;
 - original spark, ground-smoke and persistent skid graphics.
 
-The world runs at the original **70 Hz simulation rate**, independently of video. The pinned PicoDrive City/Stock stress test measures **12.0 fps** without slow-motion physics.
+The world runs at the original **70 Hz simulation rate**, independently of video. The pinned PicoDrive City/Stock stress test now measures **15.0 fps** without slow-motion physics.
 
 ## Play
 
@@ -58,6 +62,7 @@ The current renderer uses:
 
 - master/slave SH-2 parallel floor and panorama rendering;
 - 80×65 floor samples expanded in the DOS low-detail style;
+- an SH-2 assembly floor-row kernel combining map/tile lookup, shade translation and aligned packed 4×2 output;
 - 2×2 trackside sprite and polygon sampling;
 - low-detail textured wall columns;
 - an eight-frame cached textured minimap;
@@ -68,8 +73,15 @@ The current renderer uses:
 - frequency-sorted 28-tile SDRAM cache covering 95% of Racer's Edge and 92% of The City map cells;
 - cached map indices, panoramas, mountain layer, and 8 KiB shade table in aligned SDRAM;
 - build-time `SEC_TOMAP` wall conversion and DDA wall interpolation with no divide/modulo in horizontal loops;
-- broad-phase collision rejection before closest-point projection;
-- no-divide integer normalisation only after a real wall contact, never in the normal 70 Hz scan.
+- `SEC_FindSector`-style current-sector/adjacent-sector lookup before a rare full-map fallback;
+- source-style breadth-first rendering capped at 20 sectors, with a conservative portal cone;
+- per-sector scenery ranges plus 16×16 default-sector bins: the City stress view transforms 89 candidates instead of all 325 objects;
+- visible-wall lists: the measured City view processes 18 of 123 walls;
+- collision checks over roughly 3–8 current-sector sides instead of all 86/123 track walls;
+- aligned SDRAM caches for sector topology and sector-object indices;
+- separate master-panorama, slave-floor and synchronization-wait profiling through calibrated QA probes;
+- packed four-pixel panorama writes and one-branch seam wrapping, after removing more than 11,000 `% 320` divisions per Racer's Edge frame;
+- restoring integer normalisation only after a real wall contact, never in the normal sector scan.
 
 PWM audio remains disabled by default because continuous slave-SH-2 FIFO polling stalls some ARM PicoDrive builds. The slave is used for floor rendering instead.
 
@@ -95,7 +107,7 @@ make GENDEV=/opt/toolchains/sega
 python3 tools/import_speed_haste.py /path/to/SPEEDH.JCL --out assets/generated
 ```
 
-The importer follows `jclib.c`, `racemap.c`, `sectors.c`, `is2code.c`, `object3d.c` and `flsprs.c`. It now imports both shareware maps, both panoramas/cockpits and all 12 vehicle models.
+The importer follows `jclib.c`, `racemap.c`, `sectors.c`, `is2code.c`, `object3d.c` and `flsprs.c`. It imports both shareware maps, all 158 sector polygons and 702 topology sides, both panoramas/cockpits, and all 12 vehicle models.
 
 ## Automated tests
 
@@ -106,11 +118,11 @@ make GENDEV=/path/to/toolchains/sega test
 The PicoDrive E2E selects the newly added content through emulated pad input:
 
 ```text
-title → main menu → The City → Stock → car selection → countdown
-      → race → accelerate → wall impact → drive away → pause/resume → finish
+title → The City/Stock → race → wall impact/recovery → pause → finish
+      → menus → Racer's Edge/Formula One → complete collision-tested PATH lap
 ```
 
-The suite captures 16 points, rejects black/frozen output, verifies selection changes, visible travel, source-wall collision and recovery, trackside cameras, shared floor/object projection, directional-car orientation and active chase-camera lag, and enforces a 9 fps minimum on The City. The anti-stick point-to-point gate steers into a wall, reverses steering, and requires the encoded world position to keep changing. Current result: **12.0 fps**, 103,292 RGB bytes changed by acceleration, 143,632 by steering/collision, and 53 position-probe changes while driving away.
+The suite captures 17 points, rejects black/frozen output, verifies selection changes, visible travel, source-wall collision and recovery, trackside cameras, shared floor/object projection, directional-car orientation and active chase-camera lag, and enforces a 12 fps minimum on The City. It validates every packed SEC/object-range/default-bin record and all 20 starts per track. The E2E completes the entire Racer's Edge PATH through real rectangular collision with no reported contact. Current result: **15.0 fps**, 150 frames per 600 VBlanks, 104,257 RGB bytes changed by acceleration, 131,396 by steering/collision, and 68 position-probe changes while driving away.
 
 See [`test-results/emulator/report.json`](test-results/emulator/report.json).
 

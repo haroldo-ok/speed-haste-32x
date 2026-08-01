@@ -11,11 +11,20 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from libretro_harness import LibretroHarness
 
+PAD_B = 0  # RetroPad B maps to Genesis B in PicoDrive
 PAD_START = 3
 PAD_LEFT = 6
 PAD_RIGHT = 7
 PAD_C = 8  # RetroPad A maps to Genesis C in PicoDrive
 PAD_X = 10 # RetroPad L maps to Genesis X
+
+
+def route_active_probe(emu: LibretroHarness) -> tuple[int, int, int]:
+    return emu.pixel(311, 223)
+
+
+def route_probe(emu: LibretroHarness) -> tuple[int, int, int]:
+    return emu.pixel(312, 223)
 
 
 def wall_collision_probe(emu: LibretroHarness) -> tuple[int, int, int]:
@@ -40,6 +49,27 @@ def camera_probe(emu: LibretroHarness) -> tuple[int, int, int]:
 
 def heartbeat(emu: LibretroHarness) -> tuple[int, int, int]:
     return emu.pixel(319, 223)
+
+
+def decode_profile_word(emu: LibretroHarness, x: int, y: int) -> int:
+    palette = {emu.pixel(288 + nibble, 223): nibble for nibble in range(16)}
+    value = 0
+    for offset in range(4):
+        color = emu.pixel(x + offset, y)
+        assert color in palette, f"profile probe color {color} is not calibrated"
+        value = (value << 4) | palette[color]
+    return value
+
+
+def render_profile(emu: LibretroHarness) -> dict[str, int]:
+    names = ("visibility", "panorama", "floor_slave", "floor_wait", "walls",
+             "obstacles", "cars_effects", "hud", "total")
+    result = {name: decode_profile_word(emu, 272 + index * 4, 222)
+              for index, name in enumerate(names)}
+    result["visible_sectors"] = decode_profile_word(emu, 296, 221)
+    result["visible_walls"] = decode_profile_word(emu, 300, 221)
+    result["object_candidates"] = decode_profile_word(emu, 304, 221)
+    return result
 
 
 def wait_probe_change(emu: LibretroHarness, old: tuple[int, int, int], limit: int,
@@ -98,7 +128,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     report: dict[str, object] = {
         "core": str(args.core.resolve()), "rom": str(args.rom.resolve()),
-        "sequence": "title -> main -> The City -> Stock -> car -> countdown -> race -> wall impact -> recovery -> pause -> finish",
+        "sequence": "title -> The City/Stock race -> wall recovery -> finish -> Racer's Edge PATH lap regression",
     }
 
     with LibretroHarness(args.core, args.rom) as emu:
@@ -153,7 +183,17 @@ def main() -> int:
         measured_fps = changes / 10.0
         report["completed_frames_in_600_vblanks"] = changes
         report["measured_output_fps_city_stock"] = measured_fps
-        assert measured_fps >= 9.0, f"rendering regression: {measured_fps:.1f} fps"
+        assert measured_fps >= 12.0, f"rendering regression: {measured_fps:.1f} fps"
+        profile = render_profile(emu)
+        assert profile["total"] == sum(profile[name] for name in
+            ("visibility", "panorama", "floor_wait", "walls", "obstacles",
+             "cars_effects", "hud")), profile
+        assert profile["total"] > 0 and profile["panorama"] > 0, profile
+        assert profile["floor_slave"] > 0, profile
+        assert 0 < profile["visible_sectors"] <= 20, profile
+        assert 0 < profile["visible_walls"] < 123, profile
+        assert 0 < profile["object_candidates"] < 325, profile
+        report["render_profile_wdt_ticks_sclk_div8192"] = profile
 
         emu.run(420, {PAD_C})
         accelerated = capture(emu, args.out, "11_stock_accelerated", report)
@@ -207,6 +247,42 @@ def main() -> int:
             emu.run(80)
         assert probe(emu) != race_probe, "finish state was not reached"
         capture(emu, args.out, "14_finished", report)
+
+        # Return through the real menus and run the complete MAP00 authored
+        # centreline through rectangular collision. This catches walls whose
+        # endpoints straddle signed 0x80000000: separate endpoint conversion
+        # used to turn them into phantom map-wide barriers that pushed the car
+        # backwards and made Racer's Edge impossible to finish.
+        press_transition(emu, PAD_START)  # finish -> main
+        press_transition(emu, PAD_START)  # main -> circuit (currently City)
+        press_selection(emu, PAD_LEFT)    # Racer's Edge
+        press_transition(emu, PAD_START)  # circuit -> class (currently Stock)
+        press_selection(emu, PAD_LEFT)    # Formula One
+        press_transition(emu, PAD_START)  # class -> car
+        press_transition(emu, PAD_START)  # car -> countdown
+        map0_countdown = probe(emu)
+        wait_probe_change(emu, map0_countdown, 900)
+        emu.run(50)
+        emu.run(50, {PAD_LEFT, PAD_RIGHT, PAD_B})
+        emu.run(20)
+        assert max(route_active_probe(emu)) > 200, \
+            f"Racer's Edge QA route did not arm: {route_active_probe(emu)}"
+        route_vblanks = None
+        for frame in range(1, 4001):
+            emu.run(1)
+            if max(route_probe(emu)) > 200:
+                route_vblanks = frame
+                break
+        assert route_vblanks is not None, \
+            ("Racer's Edge route was blocked before completing a lap; "
+             f"point={decode_profile_word(emu, 308, 221)}, "
+             f"active={route_active_probe(emu)}, wall={wall_collision_probe(emu)}")
+        route_collision_point = decode_profile_word(emu, 308, 220)
+        assert route_collision_point == 0xFFFF, \
+            f"Racer's Edge centreline collision at PATH point {route_collision_point}"
+        report["racers_edge_route_vblanks"] = route_vblanks
+        report["racers_edge_route_collision_point"] = route_collision_point
+        capture(emu, args.out, "15_racers_edge_lap_complete", report)
 
     report["result"] = "PASS"
     (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
