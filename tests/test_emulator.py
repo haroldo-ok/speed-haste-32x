@@ -16,6 +16,7 @@ PAD_START = 3
 PAD_LEFT = 6
 PAD_RIGHT = 7
 PAD_C = 8  # RetroPad A maps to Genesis C in PicoDrive
+PAD_A = 9  # RetroPad X maps to Genesis A in PicoDrive
 PAD_X = 10 # RetroPad L maps to Genesis X
 
 
@@ -37,6 +38,10 @@ def position_probe(emu: LibretroHarness) -> tuple[tuple[int, int, int], tuple[in
 
 def collision_probe(emu: LibretroHarness) -> tuple[int, int, int]:
     return emu.pixel(316, 223)
+
+
+def car_collision_probe(emu: LibretroHarness) -> tuple[int, int, int]:
+    return emu.pixel(309, 223)
 
 
 def probe(emu: LibretroHarness) -> tuple[int, int, int]:
@@ -229,6 +234,15 @@ def main() -> int:
         assert recovery_delta > 5000, "driving away from wall did not resume world movement"
         report["wall_recovery_position_changes"] = recovery_changes
         report["wall_recovery_changed_rgb_bytes"] = recovery_delta
+        emu.run(60)
+
+        # Force an oriented rectangular car-to-car collision via the QA chord
+        # and require the dedicated car-collision probe to fire.
+        emu.run(8, {PAD_LEFT, PAD_RIGHT, PAD_A})
+        emu.run(30)
+        assert max(car_collision_probe(emu)) > 200, \
+            "oriented car-car collision never reached the MTV response"
+        report["car_collision_probe_rgb"] = list(car_collision_probe(emu))
         emu.run(60)
 
         report["vblanks_to_pause"] = press_transition(emu, PAD_START)

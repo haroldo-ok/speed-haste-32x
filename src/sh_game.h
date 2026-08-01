@@ -85,6 +85,7 @@ typedef struct SHGame {
     uint16_t sim_accumulator;
     uint16_t collision_count;
     uint16_t wall_collision_count;
+    uint16_t car_collision_count;
     uint16_t qa_route_point;
     uint16_t qa_collision_point;
     uint32_t frame;

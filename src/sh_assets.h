@@ -86,6 +86,7 @@ int32_t sha_sin30(uint16_t angle);
 uint16_t sha_vector_angle(int32_t dx, int32_t dy);
 void sha_prepare_track(uint8_t track);
 const uint8_t *sha_color_map(void);
+const uint8_t *sha_packed_shade_row(int level);
 void sha_get_track(uint8_t track, SHTrackAssets *out);
 void sha_get_sprite(uint16_t id, SHSprite *out);
 void sha_get_path(uint8_t track, uint16_t id, SHPathPoint *out);

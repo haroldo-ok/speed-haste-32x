@@ -167,6 +167,7 @@ static void reset_race(SHGame *game)
     for (i = 0; i < SH_EFFECTS; ++i) game->effects[i].type = SH_FX_NONE;
     game->collision_count = 0;
     game->wall_collision_count = 0;
+    game->car_collision_count = 0;
     game->qa_route = 0;
     game->qa_route_point = 0;
     game->qa_collision_point = 0xFFFFu;
@@ -774,24 +775,105 @@ static void ai_tick(SHGame *game, SHCar *car)
     }
 }
 
+/* Oriented rectangular car-to-car collision via the Separating Axis Theorem.
+ * Each car is the asymmetric PlayerBounds box (0xB00000 front, -0x800000
+ * rear, +/-0x380000 width) rotated by its heading. This replaces the circle
+ * approximation with correct side-swipe / rear / head-on normals and an exact
+ * minimum-translation vector that fully separates the pair. */
+static void car_rect_corners_i(const SHCar *car, int32_t cx, int32_t cy,
+                               int32_t out_x[4], int32_t out_y[4])
+{
+    const int32_t fx = sha_cos30(car->angle);
+    const int32_t fy = sha_sin30(car->angle);
+    const int32_t lx = -fy, ly = fx;
+    static const int32_t lon[4] = {
+        PLAYER_FRONT, PLAYER_FRONT, PLAYER_REAR, PLAYER_REAR
+    };
+    static const int32_t lat[4] = {
+        PLAYER_HALF_WIDTH, -PLAYER_HALF_WIDTH,
+        -PLAYER_HALF_WIDTH, PLAYER_HALF_WIDTH
+    };
+    unsigned i;
+    for (i = 0; i < 4; ++i) {
+        out_x[i] = cx + ((mul30(lon[i], fx) + mul30(lat[i], lx)) >> 18);
+        out_y[i] = cy + ((mul30(lon[i], fy) + mul30(lat[i], ly)) >> 18);
+    }
+}
+
+/* Project both rectangle corner sets onto the 2.30 axis. Returns the interval
+ * overlap in world units, or -1 when the axis fully separates them. */
+static int32_t axis_overlap(int32_t ax, int32_t ay,
+                            const int32_t *axs, const int32_t *ays,
+                            const int32_t *bxs, const int32_t *bys)
+{
+    int32_t minA = 0x7FFFFFFF, maxA = -0x7FFFFFFF;
+    int32_t minB = 0x7FFFFFFF, maxB = -0x7FFFFFFF;
+    int j;
+    for (j = 0; j < 4; ++j) {
+        int32_t p = (int32_t)(((int64_t)ax * axs[j] + (int64_t)ay * ays[j]) >> 30);
+        if (p < minA) minA = p;
+        if (p > maxA) maxA = p;
+        p = (int32_t)(((int64_t)ax * bxs[j] + (int64_t)ay * bys[j]) >> 30);
+        if (p < minB) minB = p;
+        if (p > maxB) maxB = p;
+    }
+    if (maxA < minB || maxB < minA) return -1;
+    return (maxA < maxB ? maxA : maxB) - (minA > minB ? minA : minB);
+}
+
 static void collide_cars(SHGame *game)
 {
     SHCar *player = &game->player;
+    const int32_t pf = sha_cos30(player->angle);
+    const int32_t ps = sha_sin30(player->angle);
     unsigned i;
     for (i = 0; i < SH_AI_CARS; ++i) {
         SHCar *other = &game->ai[i];
-        int32_t dx = ((int32_t)(player->x - other->x)) >> 18;
-        int32_t dy = ((int32_t)(player->y - other->y)) >> 18;
-        if (abs32(dx) > 42 || abs32(dy) > 42 || dx * dx + dy * dy >= 42 * 42)
-            continue;
-        player->x += dx >= 0 ? (2u << 18) : (uint32_t)-(2 << 18);
-        player->y += dy >= 0 ? (2u << 18) : (uint32_t)-(2 << 18);
+        int32_t ocx = ((int32_t)(other->x - player->x)) >> 18;
+        int32_t ocy = ((int32_t)(other->y - player->y)) >> 18;
+        int32_t pax[4], pay[4], obx[4], oby[4];
+        const int32_t of = sha_cos30(other->angle);
+        const int32_t os = sha_sin30(other->angle);
+        int32_t axes[4][2];
+        int32_t min_overlap = 0x7FFFFFFF;
+        int32_t mtv_x = 0, mtv_y = 0;
+        int a, separated = 0;
+        /* Early reject: centres further than the widest box diagonal. */
+        if (abs32(ocx) > 120 || abs32(ocy) > 120) continue;
+        car_rect_corners_i(player, 0, 0, pax, pay);
+        car_rect_corners_i(other, ocx, ocy, obx, oby);
+        axes[0][0] = pf;  axes[0][1] = ps;   /* player forward */
+        axes[1][0] = -ps; axes[1][1] = pf;   /* player lateral */
+        axes[2][0] = of;  axes[2][1] = os;   /* other forward */
+        axes[3][0] = -os; axes[3][1] = of;   /* other lateral */
+        for (a = 0; a < 4; ++a) {
+            int32_t ov = axis_overlap(axes[a][0], axes[a][1],
+                                      pax, pay, obx, oby);
+            if (ov < 0) { separated = 1; break; }
+            if (ov < min_overlap) { min_overlap = ov; mtv_x = axes[a][0]; mtv_y = axes[a][1]; }
+        }
+        if (separated) continue;
+        {
+            /* MTV axis is the least-overlap separating axis. Push the player
+             * AWAY from the other car's centre: when cd>0 the other car lies
+             * on the +mtv side, so the player moves in the -mtv direction. */
+            int64_t cd = (int64_t)ocx * mtv_x + (int64_t)ocy * mtv_y;
+            int32_t ux = mtv_x, uy = mtv_y;
+            int32_t push_x, push_y;
+            if (cd > 0) { ux = -ux; uy = -uy; }
+            push_x = (int32_t)(((int64_t)min_overlap * ux) >> 30);
+            push_y = (int32_t)(((int64_t)min_overlap * uy) >> 30);
+            if (push_x == 0 && push_y == 0) push_x = (ux >= 0) ? 1 : -1;
+            player->x += (uint32_t)(push_x << 18);
+            player->y += (uint32_t)(push_y << 18);
+        }
         player->revo = (player->revo * 7) >> 3;
         player->slidspeed = player->v >> 1;
         player->slidcounter = 12;
         player->sliding = 1;
         other->v = (other->v * 7) >> 3;
         ++game->collision_count;
+        ++game->car_collision_count;
         if ((game->race_ticks & 3u) == 0)
             add_effect(game, SH_FX_SPARK,
                        player->x / 2u + other->x / 2u,
@@ -959,6 +1041,17 @@ void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks)
             game->player.finished = 1;
             game->mode = SH_MODE_FINISHED;
         }
+    }
+    else if (game->mode == SH_MODE_RACE &&
+             (pad & (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_A)) ==
+             (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_A) &&
+             (pressed & SH_PAD_A)) {
+        /* QA: force a rectangular car-to-car collision by overlapping an AI
+         * car with the player, then verify the SAT MTV fires (car probe). */
+        game->ai[0].x = game->player.x;
+        game->ai[0].y = game->player.y;
+        game->ai[0].angle = game->player.angle;
+        game->car_collision_count = 0;
     }
 #endif
     else if (game->mode == SH_MODE_PAUSED && (pressed & SH_PAD_START))
