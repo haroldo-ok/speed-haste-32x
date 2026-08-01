@@ -20,5 +20,7 @@ typedef struct SH2FloorRowJob {
 
 /* 80 floor samples -> aligned packed 4x2 framebuffer pixels. */
 void sh2_floor_row(const SH2FloorRowJob *job);
+/* 40 floor samples -> 8-px columns for perspective-compressed far rows. */
+void sh2_floor_row_far(const SH2FloorRowJob *job);
 
 #endif

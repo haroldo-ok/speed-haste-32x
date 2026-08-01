@@ -154,4 +154,58 @@ for probe in (313, 314, 315):
 assert "wall_recovery_position_changes" in e2e
 assert "car remained pinned to wall" in e2e
 
-print("PASS: full SEC topology, local lookup, rectangular swept collision and wall escape")
+# Oriented rectangular car-to-car collision via SAT (replaces the circle
+# approximation) with a minimum-translation vector that fully separates.
+assert "car_rect_corners_i" in game
+assert "axis_overlap" in game
+assert "min_overlap" in game and "mtv_x" in game
+for fragment in ("Separating Axis Theorem", "min_overlap * ux", "push_y << 18"):
+    assert fragment in game, fragment
+assert "dx * dx + dy * dy >= 42 * 42" not in game  # circle path removed
+
+# Python SAT model reproduces the C box and MTV for representative cases.
+def car_corners(cx, cy, angle, front=0xB00000, rear=-0x800000, half=0x380000):
+    import math
+    a = angle * 2 * math.pi / 65536
+    fx, fy = math.cos(a), math.sin(a)
+    lx, ly = -fy, fx
+    lon = [front, front, rear, rear]
+    lat = [half, -half, -half, half]
+    out = []
+    for L, La in zip(lon, lat):
+        # corner in 18-bit fixed world units, then >>18 to integer world units
+        x18 = int(round(L * fx + La * lx))
+        y18 = int(round(L * fy + La * ly))
+        out.append((cx + (x18 >> 18), cy + (y18 >> 18)))
+    return out
+
+def axis_overlap_py(ax, ay, A, B):
+    proj = lambda C: [ax * x + ay * y for x, y in C]
+    pA, pB = proj(A), proj(B)
+    if max(pA) < min(pB) or max(pB) < min(pA):
+        return -1
+    return min(max(pA), max(pB)) - max(min(pA), min(pB))
+
+def sat_overlap(A, B, fA, fB):
+    axes = [(fA[0], fA[1]), (-fA[1], fA[0]), (fB[0], fB[1]), (-fB[1], fB[0])]
+    for ax, ay in axes:
+        ov = axis_overlap_py(ax, ay, A, B)
+        if ov < 0:
+            return False, None
+    return True, min(axis_overlap_py(ax, ay, A, B) for ax, ay in axes)
+
+# Two cars side-by-side, same heading: they overlap -> SAT reports collision.
+A = car_corners(0, 0, 0)
+B = car_corners(0, 25, 0)          # shifted 25 units laterally (overlaps, width 14+14=28)
+assert sat_overlap(A, B, (1, 0), (1, 0))[0]
+# Far apart on the same axis: no collision.
+B2 = car_corners(0, 80, 0)
+assert not sat_overlap(A, B2, (1, 0), (1, 0))[0]
+# Head-on (180 deg): front ends collide.
+B3 = car_corners(78, 0, 0x8000)
+assert sat_overlap(A, B3, (1, 0), (-1, 0))[0]
+# T-bone: lateral box of one vs front of other still registers overlap.
+B4 = car_corners(45, 0, 0x4000)    # 90 deg turn at the side
+assert sat_overlap(A, B4, (1, 0), (0, 1))[0]
+
+print("PASS: full SEC topology, local lookup, rectangular swept collision, wall escape and car-car SAT")

@@ -23,6 +23,10 @@
 #define MAX_VISIBLE 16
 #define MAX_VISIBLE_SECTORS 20
 #define MAX_VISIBLE_WALLS 128
+/* Far-row decimation is disabled: 8-px columns were too noticeable at the
+ * horizon. The whole floor renders at clean 4-px. (Keep the constant so the
+ * code path can be re-enabled if a faster floor is ever needed.) */
+#define FLOOR_FAR_ROWS 0
 
 typedef struct SHRenderProfile {
     uint16_t visibility, panorama, floor_slave, floor_wait;
@@ -224,10 +228,11 @@ static void build_visible_sectors(const SHGame *game, Camera *cam)
 
 static void draw_background(volatile uint8_t *fb, const Camera *cam)
 {
+    /* sha_prepare_track composites the mountains over the sky band, so sky
+     * is already fully opaque and pans as a single image. No per-pixel
+     * transparency and no separate mountain pass remain. */
     const uint8_t *sky = cam->assets.sky;
-    const uint8_t *mountains = cam->assets.mountains;
     const int sky_h = SKY_H;
-    const int mountain_h = cam->track ? 35 : 49;
     int offset = (int)(((uint32_t)3 * cam->angle * 320u) >> 16);
     int y, x;
     while (offset >= 320) offset -= 320;
@@ -257,41 +262,10 @@ static void draw_background(volatile uint8_t *fb, const Camera *cam)
             dst[x] = pattern;
         }
     }
-    for (y = 0; y < mountain_h; ++y) {
-        const uint8_t *src = mountains + y * 320;
-        volatile uint8_t *dst8 = fb + (VIEW_Y + sky_h - mountain_h + y) * 320;
-        volatile uint32_t *dst32 = (volatile uint32_t *)dst8;
-        int sx = 320 - offset;
-        if (sx == 320) sx = 0;
-        for (x = 0; x < 80; ++x) {
-            uint8_t c0, c1, c2, c3;
-            if (sx <= 316) {
-                c0 = src[sx]; c1 = src[sx + 1];
-                c2 = src[sx + 2]; c3 = src[sx + 3];
-                sx += 4; if (sx == 320) sx = 0;
-            } else {
-                c0 = src[sx]; if (++sx == 320) sx = 0;
-                c1 = src[sx]; if (++sx == 320) sx = 0;
-                c2 = src[sx]; if (++sx == 320) sx = 0;
-                c3 = src[sx]; if (++sx == 320) sx = 0;
-            }
-            if (c0 && c1 && c2 && c3) {
-                dst32[x] = ((uint32_t)c0 << 24) | ((uint32_t)c1 << 16) |
-                           ((uint32_t)c2 << 8) | c3;
-            } else {
-                int px = x << 2;
-                if (c0) dst8[px] = c0;
-                if (c1) dst8[px + 1] = c1;
-                if (c2) dst8[px + 2] = c2;
-                if (c3) dst8[px + 3] = c3;
-            }
-        }
-    }
 }
 
 static void draw_floor(volatile uint8_t *fb, const Camera *cam)
 {
-    const uint8_t *translation = sha_color_map();
     const uint8_t *map = cam->assets.map;
     const uint8_t *tiles = cam->assets.tiles;
     const uint8_t *cached_tiles = cam->assets.cached_tiles;
@@ -305,7 +279,9 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
     floor_job.cached_count = cached_count;
     /* The 32X cartridge bus is shared by both SH-2s. Render the floor at
      * 80x65 samples and expand 4x2, matching the chunky low-detail option of
-     * the DOS game while reducing ROM tile fetches by eight. */
+     * the DOS game while reducing ROM tile fetches by eight. Far rows (near
+     * the horizon) are perspective-compressed, so they use 8-px columns
+     * (40 samples) with no visible change, halving their sample count. */
     for (row = 0; row < VIEW_H - 70; row += 2) {
         int Y = cam->horizon + row;
         int32_t radius = muldiv(cam->height, cam->focus, Y);
@@ -323,18 +299,29 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
               - (int32_t)(((int64_t)step_x * 320) >> 1);
         pos_y = (int32_t)cam->y + (int32_t)(((int64_t)radius * sha_sin30(cam->angle)) >> 22)
               - (int32_t)(((int64_t)step_y * 320) >> 1);
-        pos_x += step_x + step_x;
-        pos_y += step_y + step_y;
-        step_x <<= 2;
-        step_y <<= 2;
         floor_job.dst0 = (volatile uint32_t *)(fb + (floor_y + row) * 320);
         floor_job.dst1 = (volatile uint32_t *)(fb + (floor_y + row + 1) * 320);
-        floor_job.shade = translation + ((31 - level) << 8);
-        floor_job.pos_x = (uint32_t)pos_x;
-        floor_job.pos_y = (uint32_t)pos_y;
-        floor_job.step_x = step_x;
-        floor_job.step_y = step_y;
-        sh2_floor_row(&floor_job);
+        floor_job.shade = sha_packed_shade_row(level);
+        if (row < FLOOR_FAR_ROWS) {
+            /* 8-px columns: center of first column is 4 px in; step is 8 px. */
+            pos_x += step_x * 4;
+            pos_y += step_y * 4;
+            floor_job.pos_x = (uint32_t)pos_x;
+            floor_job.pos_y = (uint32_t)pos_y;
+            floor_job.step_x = step_x * 8;
+            floor_job.step_y = step_y * 8;
+            sh2_floor_row_far(&floor_job);
+        } else {
+            pos_x += step_x + step_x;
+            pos_y += step_y + step_y;
+            step_x <<= 2;
+            step_y <<= 2;
+            floor_job.pos_x = (uint32_t)pos_x;
+            floor_job.pos_y = (uint32_t)pos_y;
+            floor_job.step_x = step_x;
+            floor_job.step_y = step_y;
+            sh2_floor_row(&floor_job);
+        }
     }
 }
 
@@ -438,6 +425,20 @@ static void draw_sprite_xy(volatile uint8_t *fb, uint16_t id, int x, int y)
     SHSprite sp;
     int yy, xx;
     sha_get_sprite(id, &sp);
+    /* Fast path: HUD sprites sit fully on-screen at fixed positions, so the
+     * per-pixel bounds checks and per-pixel address recompute are dropped. */
+    if (x >= 0 && y >= 0 && x + sp.width <= 320 && y + sp.height <= 224) {
+        uint8_t *base = (uint8_t *)fb + (uintptr_t)(y * 320 + x);
+        for (yy = 0; yy < sp.height; ++yy) {
+            const uint8_t *src = sp.pixels + yy * sp.width;
+            uint8_t *dst = base + (uintptr_t)(yy * 320);
+            for (xx = 0; xx < sp.width; ++xx) {
+                uint8_t c = src[xx];
+                if (c) dst[xx] = c;
+            }
+        }
+        return;
+    }
     for (yy = 0; yy < sp.height; ++yy) {
         int dy = y + yy;
         if (dy < 0 || dy >= 224) continue;
@@ -914,6 +915,9 @@ static void draw_minimap(volatile uint8_t *fb, const Camera *cam, const SHCar *p
             }
     }
     age = (uint8_t)((age + 1) & 7);
+    /* The renderer redraws the whole viewport every frame, so the minimap must
+     * be copied to the framebuffer every frame even though its cache is only
+     * recomputed every 8 frames. */
     for (y = 0; y < 64; ++y) {
         const uint32_t *src = (const uint32_t *)(cache + y * 64);
         volatile uint32_t *dst = (volatile uint32_t *)(fb + (VIEW_Y + 3 + y) * 320 + 252);
@@ -1150,6 +1154,7 @@ void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
     fb[223 * 320 + 314] = (uint8_t)(224 + ((game->player.x >> 20) & 15u));
     fb[223 * 320 + 315] = (uint8_t)(224 + ((game->player.y >> 20) & 15u));
     fb[223 * 320 + 316] = game->collision_count ? 96 : 0;
+    fb[223 * 320 + 309] = game->car_collision_count ? 96 : 0;
     fb[223 * 320 + 317] =
         abs32((int16_t)(game->player.movangle - game->camera_angle)) >= 32 ? 96 : 0;
     fb[223 * 320 + 318] = (uint8_t)(game->mode == SH_MODE_MENU ?

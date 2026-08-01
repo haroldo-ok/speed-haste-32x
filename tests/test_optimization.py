@@ -22,7 +22,24 @@ def constant(name: str) -> int:
 assert "0xFFFFFF00" in math_s
 assert "dmuls.l" in math_s
 assert "_sh2_floor_row" in math_s
-assert "mov     #80,r14" in math_s
+assert "mov     #40,r14" in math_s          # 80 samples / 2x unroll
+assert ".Lf0_rom" in math_s and ".Lf1_rom" in math_s  # two unrolled sample blocks
+assert "mov.l   @(36,r4),r4" in math_s      # step_y hoisted out of the loop
+assert "_sh2_floor_row_far" in math_s and ".Lffar_loop" in math_s  # far-row kernel
+assert "FLOOR_FAR_ROWS" in render and "sh2_floor_row_far(&floor_job)" in render
+# SDRAM caches for the render hot paths (records, sprite meta, sprite pixels).
+assert "wall_cache" in assets and "obstacle_cache" in assets
+assert "sprite_meta_cache" in assets and "sprite_cache" in assets
+assert "out->walls = CACHE_THROUGH(wall_cache)" in assets
+assert "out->obstacles = CACHE_THROUGH(obstacle_cache)" in assets
+assert "sprite_cache_map" in assets and "build_sprite_cache" in assets
+assert "packed_shade_cache" in assets and "sha_packed_shade_row" in assets
+assert "sha_packed_shade_row(level)" in render
+assert "mov.l   @(r0,r10),r0" in math_s  # packed color load in floor kernel
+# HUD fast path: on-screen sprites skip per-pixel bounds checks.
+assert "x + sp.width <= 320" in render and "y + sp.height <= 224" in render
+assert "car_collision_count" in (root / "src/sh_game.c").read_text()
+assert "223 * 320 + 309" in render  # car-collision QA probe
 assert "mov.l   r0,@r5" in math_s and "mov.l   r0,@r6" in math_s
 assert "sh2_floor_row(&floor_job)" in render
 assert "CACHE_THROUGH" in assets
