@@ -40,6 +40,15 @@ assert "mov.l   @(r0,r10),r0" in math_s  # packed color load in floor kernel
 assert "x + sp.width <= 320" in render and "y + sp.height <= 224" in render
 assert "car_collision_count" in (root / "src/sh_game.c").read_text()
 assert "223 * 320 + 309" in render  # car-collision QA probe
+# Split screen: two stacked viewports, a second player car, and pad 2 input.
+assert "split_viewport" in render and "render_split" in render
+assert "player2" in (root / "src/sh_game.h").read_text()
+assert "drive_player2" in (root / "src/sh_game.c").read_text()
+assert "platform_read_pad2" in (root / "src/platform/platform.h").read_text()
+assert "MARS_SYS_COMM10" in (root / "src/platform/platform_32x.c").read_text()
+# The slave floor must always receive a viewport or the single-player floor
+# reads an uninitialized cam.vp and glitches.
+assert "cam.vp = full_viewport();" in render
 assert "mov.l   r0,@r5" in math_s and "mov.l   r0,@r6" in math_s
 assert "sh2_floor_row(&floor_job)" in render
 assert "CACHE_THROUGH" in assets

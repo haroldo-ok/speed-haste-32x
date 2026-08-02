@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define SH_AI_CARS 4
-#define SH_RACERS (SH_AI_CARS + 1)
+#define SH_RACERS (SH_AI_CARS + 2)  /* 2 players + 4 AI */
 #define SH_LAPS 3
 #define SH_EFFECTS 16
 
@@ -90,13 +90,16 @@ typedef struct SHGame {
     uint16_t qa_collision_point;
     uint32_t frame;
     uint32_t race_ticks;
+    uint8_t split;          /* 1 = two-player split screen */
     SHCar player;
+    SHCar player2;
     SHCar ai[SH_AI_CARS];
     SHEffect effects[SH_EFFECTS];
 } SHGame;
 
 void sh_game_init(SHGame *game);
-void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks);
+void sh_game_frame(SHGame *game, uint16_t pad, uint16_t pad2,
+                   uint16_t elapsed_vblanks);
 uint8_t sh_ground_color(uint8_t track, uint32_t x, uint32_t y);
 
 #endif

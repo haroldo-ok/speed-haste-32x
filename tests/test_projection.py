@@ -15,14 +15,15 @@ def macro(name: str) -> str:
 
 
 # The original RenderView calls both floor and SEC/FSP rendering at hsk+y.
-assert macro("VIEW_Y") == "12"
-assert macro("SKY_H") == "70"
-assert macro("PROJ_Y") == "(VIEW_Y + SKY_H)"
-assert "const int floor_y = PROJ_Y;" in render
+# Single-player and split viewports share this projection base via cam->vp.
+assert "full_viewport" in render and "split_viewport" in render
+assert "v.proj_y = 12 + 70" in render          # full-screen floor base
+assert "v.proj_y = v.y + 35" in render         # split half-height floor base
+assert "const int floor_y = cam->vp.proj_y;" in render
 for expected in (
-    "sy[i] = (int16_t)(PROJ_Y",
-    "y = PROJ_Y + muldiv",
-    "bottom0 = PROJ_Y - cam->horizon",
+    "sy[i] = (int16_t)(cam->vp.proj_y",
+    "y = cam->vp.proj_y + muldiv",
+    "bottom0 = cam->vp.proj_y - cam->horizon",
 ):
     assert expected in render, f"object projection diverged from floor: {expected}"
 

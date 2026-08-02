@@ -50,6 +50,15 @@ The test builds PicoDrive revision `78a662e3135871a6c657d5e61900f6704152e594` an
 14. Exercise three lap checkpoints and reach finish.
 15. Return through the menus, start Racer's Edge/Formula One, traverse all 88 authored PATH points through real rectangular collision, and require a completed route with collision point `0xFFFF`.
 
+### Split-screen test
+
+`bash tools/test_split.sh` (or the `make test-split` target) boots the ROM, toggles two-player mode on the main menu, starts a race and verifies:
+
+- the main menu visibly changes when the one/two-player toggle is pressed;
+- both stacked viewports (top rows 12–111, bottom rows 112–211) render non-black, distinct world content;
+- player 2 (AI-driven here, since the emulator exposes one pad) makes the bottom viewport move;
+- split-screen frame rate stays above 8 fps (measured 12.0 fps).
+
 ### Black/frozen-screen gates
 
 Every capture must provide 320×224 output, at least eight colors and at least 25% non-black pixels. Menu selections must alter the framebuffer, state probes must transition, and the heartbeat must continue changing during a race.
@@ -58,17 +67,14 @@ Every capture must provide 320×224 output, at least eight colors and at least 2
 
 The City is larger than Racer's Edge and is tested with Stock cars. The current report records:
 
-- 150 completed frames in 600 VBlanks;
-- **15.0 output fps**;
+- 200 completed frames in 600 VBlanks;
+- **20.0 output fps** in single player (12.0 fps in split screen);
 - independent 70 Hz world simulation;
 - 20 visible sectors, 18 of 123 walls and 89 of 325 object candidates;
-- master-critical profile: 3 visibility + 44 panorama + 9 floor wait + 25 walls + 35 objects + 7 cars/effects + 16 HUD = 139 ticks at Sclk/8192;
-- overlapping slave-floor profile: 53 ticks;
-- 104,257 changed RGB bytes after acceleration;
-- 131,396 after steering/collision;
-- 68 encoded position changes while driving away from the wall;
-- 140,113 changed RGB bytes between impact and recovered travel;
-- complete Racer's Edge route in 2,902 VBlanks with no collision point (`65535`/`0xFFFF`).
+- master-critical profile: 3 visibility + 25 panorama + 20 floor wait + 19 walls + 28 objects + 5 cars/effects + 13 HUD = 113 ticks at Sclk/8192;
+- overlapping slave-floor profile: 44 ticks;
+- oriented rectangular car-to-car collision (SAT) fires its QA probe;
+- complete Racer's Edge route in ~2,900 VBlanks with no collision point (`65535`/`0xFFFF`).
 
 `tests/test_collision.py` decodes every compact sector/side/vertex record, validates indices, adjacency ranges, bounds, wall links and all 40 source start positions. It also proves MAP00's ten seam-crossing walls (and MAP01's sixteen) have short wrapped deltas rather than phantom 15–16K spans, and checks current/adjacent-sector lookup, asymmetric rectangular bounds, old/mid/new corner frames, contact/release hysteresis, outward-motion handling, `slidcounter` decay and recovery steering.
 
