@@ -125,11 +125,19 @@ uint16_t platform_read_pad(void)
 uint16_t platform_read_pad2(void)
 {
     /* The 68000 stores controller 2 at 0xA1512A, which the 32X exposes to the
-     * SH-2s at MARS_SYS_COMM10. */
+     * SH-2s at MARS_SYS_COMM10. Bit 15 marks "pad present". */
     uint16_t pad = MARS_SYS_COMM10;
-    if ((pad & SEGA_CTRL_TYPE) == SEGA_CTRL_NONE)
-        pad = 0;
+    if (!(pad & 0x8000u)) /* not present */
+        return 0;
     return pad & 0x0FFFu;
+}
+
+int platform_pad2_present(void)
+{
+    /* Bit 15 of COMM10 is set by the 68000 when a second controller is
+     * physically detected, letting the game keep player 2 human-controlled
+     * even while idle (as opposed to AI fallback when no pad is connected). */
+    return (MARS_SYS_COMM10 & 0x8000u) != 0;
 }
 
 uint32_t platform_vblank_count(void)

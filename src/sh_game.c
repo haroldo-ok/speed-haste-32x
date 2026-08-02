@@ -941,7 +941,10 @@ static void update_camera(SHGame *game)
 
 static void drive_player2(SHGame *game, uint16_t pad2)
 {
-    if (pad2)
+    /* Human control only while a second controller is physically present.
+     * Otherwise the computer drives P2. Using presence (not "any button held")
+     * stops the AI from grabbing the car every time the human releases input. */
+    if (game->p2_human)
         player_tick(game, &game->player2, pad2, 1);
     else
         ai_tick(game, &game->player2);  /* no second pad: computer drives P2 */
@@ -985,9 +988,10 @@ static void simulation_tick(SHGame *game, uint16_t pad, uint16_t pad2)
 }
 
 void sh_game_frame(SHGame *game, uint16_t pad, uint16_t pad2,
-                   uint16_t elapsed_vblanks)
+                   int p2_present, uint16_t elapsed_vblanks)
 {
     uint16_t pressed = pad & (uint16_t)~game->previous_pad;
+    game->p2_human = p2_present ? 1 : 0;
     if (elapsed_vblanks == 0) elapsed_vblanks = 1;
     if (elapsed_vblanks > 30) elapsed_vblanks = 30;
     game->previous_pad = pad;

@@ -10,8 +10,9 @@ import json
 from pathlib import Path
 from libretro_harness import LibretroHarness
 
+# RetroPad IDs (libretro): B=0, START=3, UP=4, LEFT=6, RIGHT=7.
 PAD_START = 3
-PAD_UP = 2
+PAD_UP = 4
 PAD_LEFT = 6
 PAD_RIGHT = 7
 
@@ -22,6 +23,13 @@ def probe(emu):
 
 def p2_camera_lag_probe(emu):
     return emu.pixel(310, 223)
+
+
+def p2_human_probe(emu):
+    return emu.pixel(305, 223)
+
+
+
 
 
 def wait_probe_change(emu, old, limit, buttons=()):
@@ -98,41 +106,42 @@ def main() -> int:
         if not distinct:
             raise AssertionError("split viewports do not show distinct views")
 
-        before = emu.pixel(160, 150)
+        report["p2_human_probe_rgb"] = list(p2_human_probe(emu))
+        report["p2_human_in_emulator"] = max(p2_human_probe(emu)) > 200
+        # Player 2 is human (a pad is present on port 2 in PicoDrive). Drive it
+        # by accelerating on libretro port 1 and require its viewport to move.
+        p2_p0 = emu.pixel(160, 150)
         moved = False
         for _ in range(600):
-            emu.run(1)
-            if emu.pixel(160, 150) != before:
+            emu.run(1, buttons2={PAD_UP})
+            if emu.pixel(160, 150) != p2_p0:
                 moved = True
                 break
         report["player2_moved"] = moved
+        (args.out / "split_report.json").write_text(json.dumps(report, indent=2) + "\n")
         if not moved:
-            raise AssertionError("player 2 (bottom) viewport never changed")
+            raise AssertionError("player 2 position never changed (pad2 accel)")
 
-        # Player 1 steers hard (pad2=0 keeps player 2 AI-driven on its own
-        # PATH heading). Player 2's bottom viewport must keep tracking player
-        # 2 — it must still change as player 2 drives, and must not freeze to
-        # a single shared-camera frame. (Code-level independence is asserted
-        # statically in test_optimization.py.)
-        emu.run(240, {PAD_RIGHT, PAD_UP})
-        emu.run(240, {PAD_LEFT, PAD_UP})
+        # Player 2 is human. While player 1 steers, keep player 2 accelerating
+        # (pad2) and steer it so its chase camera must turn to follow. The
+        # probe fires while camera_angle2 lags toward player2.movangle.
+        emu.run(120, {PAD_RIGHT, PAD_UP}, buttons2={PAD_UP, PAD_RIGHT})
+        emu.run(120, {PAD_LEFT, PAD_UP}, buttons2={PAD_UP, PAD_LEFT})
         p2_before = emu.pixel(150, 140)
         p2_moved_after = False
         for _ in range(300):
-            emu.run(1)
+            emu.run(1, buttons2={PAD_UP, PAD_RIGHT})
             if emu.pixel(150, 140) != p2_before:
                 p2_moved_after = True
                 break
         report["p2_camera_tracks"] = p2_moved_after
         if not p2_moved_after:
-            raise AssertionError("player 2 camera stopped tracking after player 1 steering")
+            raise AssertionError("player 2 camera stopped tracking while driving")
 
-        # Player 2's chase camera must actually TURN to follow its AI car, not
-        # just translate. The probe fires while camera_angle2 lags toward
-        # player2.movangle; require it to light up at some point.
         p2_turned = False
         for _ in range(900):
-            emu.run(1)
+            steer = PAD_RIGHT if (_ // 120) % 2 == 0 else PAD_LEFT
+            emu.run(1, buttons2={PAD_UP, steer})
             if max(p2_camera_lag_probe(emu)) > 200:
                 p2_turned = True
                 break

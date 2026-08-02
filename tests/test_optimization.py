@@ -57,6 +57,14 @@ assert "p == &game->player2 ? game->camera_angle2" in render
 # AI-driven player 2 exposes a movement heading so its chase camera turns.
 assert "car->movangle = car->angle;" in (root / "src/sh_game.c").read_text()
 assert "player2.movangle - game->camera_angle2" in render  # p2 camera-turn probe
+# Player 2 is human-controlled when a second pad is present; AI only when no
+# pad is connected (presence, not "any button held", stops the AI from grabbing
+# the car whenever the human releases input).
+assert "platform_pad2_present" in (root / "src/platform/platform.h").read_text()
+assert "game->p2_human" in (root / "src/sh_game.c").read_text()
+assert "game->p2_human" in (root / "src/sh_render.c").read_text()
+assert "ori.w   #0x8000,d2" in (root / "src/platform/m68k_crt1.s").read_text()
+assert "p2_human" in (root / "src/sh_game.h").read_text()
 assert "mov.l   r0,@r5" in math_s and "mov.l   r0,@r6" in math_s
 assert "sh2_floor_row(&floor_job)" in render
 assert "CACHE_THROUGH" in assets
