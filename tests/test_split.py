@@ -11,12 +11,17 @@ from pathlib import Path
 from libretro_harness import LibretroHarness
 
 PAD_START = 3
+PAD_UP = 2
 PAD_LEFT = 6
 PAD_RIGHT = 7
 
 
 def probe(emu):
     return emu.pixel(318, 223)
+
+
+def p2_camera_lag_probe(emu):
+    return emu.pixel(310, 223)
 
 
 def wait_probe_change(emu, old, limit, buttons=()):
@@ -103,6 +108,37 @@ def main() -> int:
         report["player2_moved"] = moved
         if not moved:
             raise AssertionError("player 2 (bottom) viewport never changed")
+
+        # Player 1 steers hard (pad2=0 keeps player 2 AI-driven on its own
+        # PATH heading). Player 2's bottom viewport must keep tracking player
+        # 2 — it must still change as player 2 drives, and must not freeze to
+        # a single shared-camera frame. (Code-level independence is asserted
+        # statically in test_optimization.py.)
+        emu.run(240, {PAD_RIGHT, PAD_UP})
+        emu.run(240, {PAD_LEFT, PAD_UP})
+        p2_before = emu.pixel(150, 140)
+        p2_moved_after = False
+        for _ in range(300):
+            emu.run(1)
+            if emu.pixel(150, 140) != p2_before:
+                p2_moved_after = True
+                break
+        report["p2_camera_tracks"] = p2_moved_after
+        if not p2_moved_after:
+            raise AssertionError("player 2 camera stopped tracking after player 1 steering")
+
+        # Player 2's chase camera must actually TURN to follow its AI car, not
+        # just translate. The probe fires while camera_angle2 lags toward
+        # player2.movangle; require it to light up at some point.
+        p2_turned = False
+        for _ in range(900):
+            emu.run(1)
+            if max(p2_camera_lag_probe(emu)) > 200:
+                p2_turned = True
+                break
+        report["p2_camera_turns"] = p2_turned
+        if not p2_turned:
+            raise AssertionError("player 2 chase camera never turned to follow")
 
         # Split-screen frame rate via the heartbeat probe (must be playable).
         last = emu.pixel(319, 223)

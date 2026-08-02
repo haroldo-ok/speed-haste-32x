@@ -130,7 +130,11 @@ static void make_camera(const SHGame *game, const SHCar *p, int16_t sector_hint,
     sha_get_track(cam->track, &cam->assets);
     cam->target_x = p->x;
     cam->target_y = p->y;
-    cam->angle = game->camera == 1 ? p->angle : game->camera_angle;
+    /* Chase/high use the per-player lagged camera angle so split screen
+     * follows each car independently; cockpit uses the body angle. */
+    cam->angle = game->camera == 1 ? p->angle
+                : (p == &game->player2 ? game->camera_angle2
+                                       : game->camera_angle);
     cam->cockpit = 0;
     cam->view_car = p;
     cam->sector_hint = sector_hint;
@@ -1319,6 +1323,10 @@ void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
     fb[223 * 320 + 309] = game->car_collision_count ? 96 : 0;
     fb[223 * 320 + 317] =
         abs32((int16_t)(game->player.movangle - game->camera_angle)) >= 32 ? 96 : 0;
+    /* Player-2 camera-turning probe: nonzero while its chase camera lags
+     * toward player 2's moving heading (i.e. it is turning to follow). */
+    fb[223 * 320 + 310] =
+        abs32((int16_t)(game->player2.movangle - game->camera_angle2)) >= 32 ? 96 : 0;
     fb[223 * 320 + 318] = (uint8_t)(game->mode == SH_MODE_MENU ?
                                     24 + game->menu_page : 16 + game->mode);
     fb[223 * 320 + 319] = (uint8_t)(224 + (game->frame & 15));

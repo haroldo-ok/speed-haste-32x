@@ -160,6 +160,7 @@ static void reset_race(SHGame *game)
     game->player2.model = (uint8_t)((game->selected_car + 3) % 6);
     game->player2.car_type = game->car_type & 1u;
     game->player2.max_speed = car_max_speed[game->player2.car_type][game->player2.model];
+    game->camera_angle2 = game->player2.angle;
 
     for (i = 0; i < SH_AI_CARS; ++i) {
         clear_car(&game->ai[i]);
@@ -732,6 +733,10 @@ static void ai_tick(SHGame *game, SHCar *car)
     car->angle = (uint16_t)(car->angle + muldiv(car->av, car->v, 1 << 22));
     car->x += (uint32_t)mul30(car->v, sha_cos30(car->angle));
     car->y += (uint32_t)mul30(car->v, sha_sin30(car->angle));
+    /* The car physically moves along its body angle; expose that as the
+     * movement heading so the split-screen chase camera (which lags 1/16
+     * toward movangle) turns to follow this AI car instead of freezing. */
+    car->movangle = car->angle;
     {
         SHTrackAssets assets;
         sha_get_track(track, &assets);
@@ -912,18 +917,26 @@ static void rank_cars(SHGame *game)
             }
 }
 
-static void update_camera(SHGame *game)
+/* race.c::HandleView(): chase/high cameras lag the car's movement angle by
+ * 1/16; cockpit uses the physical body angle. update_camera() drives the two
+ * per-player camera angles independently so split screen follows each car. */
+static void update_one_camera(SHGame *game, const SHCar *car, uint16_t *angle)
 {
     if (game->camera == 1) {
-        /* STDCAM_LOW has radius zero and uses the physical body angle. */
-        game->camera_angle = game->player.angle;
+        *angle = car->angle;
     } else {
-        /* race.c::HandleView(): chase/high cameras lag movement angle by 1/16. */
-        int16_t delta = (int16_t)(game->player.movangle - game->camera_angle);
+        int16_t delta = (int16_t)(car->movangle - *angle);
         int16_t step = delta / 16;
-        if (step == 0) game->camera_angle = game->player.movangle;
-        else game->camera_angle = (uint16_t)(game->camera_angle + step);
+        if (step == 0) *angle = car->movangle;
+        else *angle = (uint16_t)(*angle + step);
     }
+}
+
+static void update_camera(SHGame *game)
+{
+    update_one_camera(game, &game->player, &game->camera_angle);
+    if (game->split)
+        update_one_camera(game, &game->player2, &game->camera_angle2);
 }
 
 static void drive_player2(SHGame *game, uint16_t pad2)
