@@ -342,13 +342,16 @@ vert_blank:
         move.l  d1,-(sp)
         move.l  d2,-(sp)
 
-        /* read controllers */
+        /* read controllers. Bit 15 of each stored word is set to mark that a
+         * pad is physically present (button bits are 0-12), so the SH-2s can
+         * tell an idle pad from "no pad connected" for split-screen control. */
         move.w  0xA15128,d0
         andi.w  #0xF000,d0
         cmpi.w  #0xF000,d0
         beq.b   0f                  /* no pad in port 1 (or mouse) */
         lea     0xA10003,a0
         bsr.b   get_pad
+        ori.w   #0x8000,d2           /* controller 1 present */
         move.w  d2,0xA15128         /* controller 1 current value */
 0:
         move.w  0xA1512A,d0
@@ -357,6 +360,7 @@ vert_blank:
         beq.b   1f                  /* no pad in port 2 (or mouse) */
         lea     0xA10005,a0
         bsr.b   get_pad
+        ori.w   #0x8000,d2           /* controller 2 present */
         move.w  d2,0xA1512A         /* controller 2 current value */
 1:
         move.l  0xA1512C,d0

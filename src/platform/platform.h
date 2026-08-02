@@ -11,6 +11,7 @@ volatile uint8_t *platform_back_buffer(void);
 void platform_flip(void);
 uint16_t platform_read_pad(void);
 uint16_t platform_read_pad2(void);
+int platform_pad2_present(void);
 void platform_set_engine_pitch(uint16_t pitch);
 void platform_set_vga_palette(const uint8_t *vga_rgb);
 uint32_t platform_vblank_count(void);

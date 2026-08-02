@@ -15,8 +15,9 @@ int main(void)
         uint16_t elapsed = (uint16_t)(now - last_vblank);
         uint16_t pad = platform_read_pad();
         uint16_t pad2 = platform_read_pad2();
+        int p2_present = platform_pad2_present();
         last_vblank = now;
-        sh_game_frame(&game, pad, pad2, elapsed);
+        sh_game_frame(&game, pad, pad2, p2_present, elapsed);
         sh_render_frame(platform_back_buffer(), &game);
         platform_flip();
     }

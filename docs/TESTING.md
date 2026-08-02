@@ -56,8 +56,9 @@ The test builds PicoDrive revision `78a662e3135871a6c657d5e61900f6704152e594` an
 
 - the main menu visibly changes when the one/two-player toggle is pressed;
 - both stacked viewports (top rows 12–111, bottom rows 112–211) render non-black, distinct world content;
-- player 2 (AI-driven here, since the emulator exposes one pad) makes the bottom viewport move;
-- split-screen frame rate stays above 8 fps (measured 12.0 fps).
+- player 2 is human-controlled via libretro port 1 (PicoDrive connects a pad to port 2, so the presence bit is set); driving it with pad-2 accelerator makes the bottom viewport move;
+- player 2's chase camera tracks and turns to follow its own car (probe x=310);
+- split-screen frame rate stays above 8 fps.
 
 ### Black/frozen-screen gates
 

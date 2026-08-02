@@ -67,6 +67,7 @@ class LibretroHarness:
         self.core = C.CDLL(str(self.core_path))
         self.pixel_format = RETRO_PIXEL_FORMAT_0RGB1555
         self.buttons: set[int] = set()
+        self.buttons2: set[int] = set()   # libretro port 1 = 32X pad 2
         self.frame_count = 0
         self.width = 0
         self.height = 0
@@ -104,6 +105,7 @@ class LibretroHarness:
         assert self.core.retro_api_version() == 1
         self.core.retro_init()
         self.core.retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD)
+        self.core.retro_set_controller_port_device(1, RETRO_DEVICE_JOYPAD)
 
         info = RetroGameInfo(str(self.rom_path).encode(), None, 0, None)
         if not self.core.retro_load_game(C.byref(info)):
@@ -165,10 +167,18 @@ class LibretroHarness:
 
     def _input_state(self, port: int, device: int, index: int, button_id: int) -> int:
         del index
-        return int(port == 0 and device == RETRO_DEVICE_JOYPAD and button_id in self.buttons)
+        if device != RETRO_DEVICE_JOYPAD:
+            return 0
+        if port == 0:
+            return int(button_id in self.buttons)
+        if port == 1:
+            return int(button_id in self.buttons2)
+        return 0
 
-    def run(self, frames: int, buttons: Iterable[int] = ()) -> None:
+    def run(self, frames: int, buttons: Iterable[int] = (),
+            buttons2: Iterable[int] = ()) -> None:
         self.buttons = set(buttons)
+        self.buttons2 = set(buttons2)
         for _ in range(frames):
             self.core.retro_run()
             if self.shutdown_requested:

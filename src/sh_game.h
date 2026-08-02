@@ -92,6 +92,7 @@ typedef struct SHGame {
     uint32_t frame;
     uint32_t race_ticks;
     uint8_t split;          /* 1 = two-player split screen */
+    uint8_t p2_human;       /* 1 = a second pad is present (player 2 is human) */
     SHCar player;
     SHCar player2;
     SHCar ai[SH_AI_CARS];
@@ -100,7 +101,7 @@ typedef struct SHGame {
 
 void sh_game_init(SHGame *game);
 void sh_game_frame(SHGame *game, uint16_t pad, uint16_t pad2,
-                   uint16_t elapsed_vblanks);
+                   int p2_present, uint16_t elapsed_vblanks);
 uint8_t sh_ground_color(uint8_t track, uint32_t x, uint32_t y);
 
 #endif

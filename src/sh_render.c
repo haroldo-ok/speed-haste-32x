@@ -1327,6 +1327,7 @@ void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
      * toward player 2's moving heading (i.e. it is turning to follow). */
     fb[223 * 320 + 310] =
         abs32((int16_t)(game->player2.movangle - game->camera_angle2)) >= 32 ? 96 : 0;
+    fb[223 * 320 + 305] = game->p2_human ? 96 : 0;  /* second pad present */
     fb[223 * 320 + 318] = (uint8_t)(game->mode == SH_MODE_MENU ?
                                     24 + game->menu_page : 16 + game->mode);
     fb[223 * 320 + 319] = (uint8_t)(224 + (game->frame & 15));
