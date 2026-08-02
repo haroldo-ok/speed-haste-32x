@@ -25,9 +25,12 @@ This revision ports both circuits and vehicle classes from the original sharewar
 - sector-local guardrail physics with the original asymmetric rectangular player bounds, swept-corner anti-tunnelling, wall-release hysteresis and crash recovery;
 - wrapped wall/rectangle coordinates across `0x80000000`, fixing Racer's Edge's phantom backwards-pushing barrier;
 - source-backed car-to-car collision response;
-- original spark, ground-smoke and persistent skid graphics.
+- original spark, ground-smoke and persistent skid graphics;
+- two-player **split screen**: two stacked half-height viewports, a second
+  player car (pad 2 on real hardware, or AI-driven if no second pad), compact
+  per-viewport HUD, and a one/two-player toggle on the main menu.
 
-The world runs at the original **70 Hz simulation rate**, independently of video. The pinned PicoDrive City/Stock stress test now measures **15.0 fps** without slow-motion physics.
+The world runs at the original **70 Hz simulation rate**, independently of video. The pinned PicoDrive City/Stock stress test now measures **20.0 fps** in single player and **12.0 fps** in two-player split screen, without slow-motion physics.
 
 ## Play
 
@@ -40,7 +43,7 @@ The cartridge is 2.5 MiB and has a valid MARS header and Genesis checksum.
 ### Menu controls
 
 - **Start/B/C:** confirm
-- **Left/Right:** change circuit, class or car
+- **Left/Right:** change circuit, class or car; on the main menu, toggle one/two-player split screen
 - **A:** go back
 
 ### Race controls
@@ -122,7 +125,7 @@ title → The City/Stock → race → wall impact/recovery → pause → finish
       → menus → Racer's Edge/Formula One → complete collision-tested PATH lap
 ```
 
-The suite captures 17 points, rejects black/frozen output, verifies selection changes, visible travel, source-wall collision and recovery, trackside cameras, shared floor/object projection, directional-car orientation and active chase-camera lag, and enforces a 12 fps minimum on The City. It validates every packed SEC/object-range/default-bin record and all 20 starts per track. The E2E completes the entire Racer's Edge PATH through real rectangular collision with no reported contact. Current result: **15.0 fps**, 150 frames per 600 VBlanks, 104,257 RGB bytes changed by acceleration, 131,396 by steering/collision, and 68 position-probe changes while driving away.
+The suite captures 17 points, rejects black/frozen output, verifies selection changes, visible travel, source-wall collision and recovery, trackside cameras, shared floor/object projection, directional-car orientation and active chase-camera lag, and enforces a 12 fps minimum on The City. It validates every packed SEC/object-range/default-bin record and all 20 starts per track. The E2E completes the entire Racer's Edge PATH through real rectangular collision with no reported contact. A dedicated split-screen test toggles two-player mode and verifies both stacked viewports render distinct world content and that player 2 moves. Current results: **20.0 fps** single-player (200 frames / 600 VBlanks), **12.0 fps** split screen.
 
 See [`test-results/emulator/report.json`](test-results/emulator/report.json).
 
@@ -138,4 +141,4 @@ See [`test-results/emulator/report.json`](test-results/emulator/report.json).
 
 ## Scope still in progress
 
-Not yet ported: two-player split screen, persistent record tables, IPX/serial/modem play, complete DOS menu decoration/animation, S3M music and VTAL audio. The registered-only six circuits are not present in the supplied shareware data and are not claimed as implemented.
+Not yet ported: persistent record tables, IPX/serial/modem play, complete DOS menu decoration/animation, S3M music and VTAL audio. The registered-only six circuits are not present in the supplied shareware data and are not claimed as implemented.

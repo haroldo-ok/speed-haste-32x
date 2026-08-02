@@ -78,6 +78,17 @@ static inline __attribute__((always_inline)) uint8_t floor_pixel(
     return pixels[(((y >> 19) & 63u) << 6) + ((x >> 19) & 63u)];
 }
 
+/* A rectangular screen band a view is drawn into. Split screen uses two
+ * stacked viewports (each ~half height); single player uses the full one. */
+typedef struct Viewport {
+    int16_t y;      /* screen row of the viewport top edge */
+    int16_t h;      /* viewport height in rows */
+    int16_t sky_h;  /* sky/panorama band height */
+    int16_t proj_y; /* y + sky_h : floor start / projection base row */
+    int16_t cx;     /* horizontal centre */
+    int16_t cy;     /* y + h/2 : vertical centre */
+} Viewport;
+
 typedef struct Camera {
     uint32_t x, y, target_x, target_y;
     uint16_t angle;
@@ -87,18 +98,43 @@ typedef struct Camera {
     uint8_t visible_sector_count, visible_wall_count;
     int16_t visible_sectors[MAX_VISIBLE_SECTORS];
     uint16_t visible_walls[MAX_VISIBLE_WALLS];
+    const SHCar *view_car;   /* the car this viewport belongs to (HUD/race) */
+    int16_t sector_hint;     /* sector hint for build_visible_sectors */
+    Viewport vp;
     SHTrackAssets assets;
 } Camera;
 
-static void make_camera(const SHGame *game, Camera *cam)
+static Viewport full_viewport(void)
 {
-    const SHCar *p = &game->player;
+    Viewport v;
+    v.y = 12; v.h = 200; v.sky_h = 70;
+    v.proj_y = 12 + 70; v.cx = 160; v.cy = 12 + 100;
+    return v;
+}
+
+static Viewport split_viewport(int bottom)
+{
+    /* Two stacked 320x100 viewports over the 224-row screen: top 12..111,
+     * bottom 112..211. Each keeps the 35-row sky band (proportions halved). */
+    Viewport v;
+    v.y = bottom ? 112 : 12;
+    v.h = 100; v.sky_h = 35;
+    v.proj_y = v.y + 35; v.cx = 160; v.cy = v.y + 50;
+    return v;
+}
+
+static void make_camera(const SHGame *game, const SHCar *p, int16_t sector_hint,
+                        Viewport vp, Camera *cam)
+{
     cam->track = game->selected_track & 1u;
     sha_get_track(cam->track, &cam->assets);
     cam->target_x = p->x;
     cam->target_y = p->y;
     cam->angle = game->camera == 1 ? p->angle : game->camera_angle;
     cam->cockpit = 0;
+    cam->view_car = p;
+    cam->sector_hint = sector_hint;
+    cam->vp = vp;
     if (game->camera == 3 && cam->assets.camera_count) {
         SHStaticCamera selected = {0, 0, 0};
         uint32_t best = 0xFFFFFFFFu;
@@ -172,16 +208,16 @@ static int portal_may_be_visible(const Camera *cam, const SHSectorSide *side)
     return 1;
 }
 
-static void build_visible_sectors(const SHGame *game, Camera *cam)
+static void build_visible_sectors(Camera *cam)
 {
     uint32_t seen_sectors[3] = {0, 0, 0};
     uint32_t seen_walls[4] = {0, 0, 0, 0};
-    int16_t start = sha_find_sector(&cam->assets, game->player.sector,
+    int16_t start = sha_find_sector(&cam->assets, cam->sector_hint,
                                     cam->x, cam->y);
     unsigned head = 0, i;
     cam->visible_sector_count = 0;
     cam->visible_wall_count = 0;
-    if (start < 0) start = game->player.sector;
+    if (start < 0) start = cam->sector_hint;
     if (start < 0 || (uint16_t)start >= cam->assets.sector_count) return;
     cam->visible_sectors[cam->visible_sector_count++] = start;
     seen_sectors[(uint16_t)start >> 5] |= 1u << ((uint16_t)start & 31u);
@@ -232,13 +268,18 @@ static void draw_background(volatile uint8_t *fb, const Camera *cam)
      * is already fully opaque and pans as a single image. No per-pixel
      * transparency and no separate mountain pass remain. */
     const uint8_t *sky = cam->assets.sky;
-    const int sky_h = SKY_H;
+    const int sky_h = cam->vp.sky_h;
+    const int vp_y = cam->vp.y;
+    /* The composite panorama is 70 rows; a smaller split viewport sky band
+     * samples it (stride) to keep both sky and mountains visible. */
+    const int pano_h = 70;
+    const int sstep = (pano_h > sky_h && sky_h > 0) ? (pano_h / sky_h) : 1;
     int offset = (int)(((uint32_t)3 * cam->angle * 320u) >> 16);
     int y, x;
     while (offset >= 320) offset -= 320;
     for (y = 0; y < sky_h; ++y) {
-        const uint8_t *src = sky + y * 320;
-        volatile uint32_t *dst = (volatile uint32_t *)(fb + (VIEW_Y + y) * 320);
+        const uint8_t *src = sky + (y * sstep) * 320;
+        volatile uint32_t *dst = (volatile uint32_t *)(fb + (vp_y + y) * 320);
         int sx = 320 - offset;
         if (sx == 320) sx = 0;
         /* Four pixels per aligned write. Only one group per row can straddle
@@ -270,7 +311,8 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
     const uint8_t *tiles = cam->assets.tiles;
     const uint8_t *cached_tiles = cam->assets.cached_tiles;
     const uint16_t cached_count = cam->assets.cached_tile_count;
-    const int floor_y = PROJ_Y;
+    const int floor_y = cam->vp.proj_y;
+    const int floor_rows = cam->vp.h - cam->vp.sky_h;
     SH2FloorRowJob floor_job;
     int row;
     floor_job.map = map;
@@ -282,7 +324,7 @@ static void draw_floor(volatile uint8_t *fb, const Camera *cam)
      * the DOS game while reducing ROM tile fetches by eight. Far rows (near
      * the horizon) are perspective-compressed, so they use 8-px columns
      * (40 samples) with no visible change, halving their sample count. */
-    for (row = 0; row < VIEW_H - 70; row += 2) {
+    for (row = 0; row < floor_rows; row += 2) {
         int Y = cam->horizon + row;
         int32_t radius = muldiv(cam->height, cam->focus, Y);
         int level;
@@ -339,6 +381,7 @@ void sh_render_slave_floor(volatile SHFloorJob *job)
     cam.target_x = cam.target_y = 0;
     cam.radius = 0;
     cam.cockpit = 0;
+    cam.vp = full_viewport();   /* slave renders the single-player full floor */
     sha_get_track(cam.track, &cam.assets);
     /* Use the exact pointers submitted by the master; both are cartridge ROM. */
     cam.assets.map = job->map;
@@ -381,13 +424,14 @@ static uint16_t wait_slave_floor(void)
 #endif
 
 static void draw_sprite_scaled(volatile uint8_t *fb, const SHSprite *sp,
-                               int center_x, int base_y, int width, int height, int mirror)
+                               int center_x, int base_y, int width, int height,
+                               int mirror, const Viewport *vp)
 {
     int y, x;
     uint32_t syfp = 0, systep, sxstep;
     if (!width || !height) return;
     if (width < 0) { width = -width; mirror ^= 1; }
-    if (width > 240 || height > 200) return;
+    if (width > 240 || height > vp->h) return;
     systep = ((uint32_t)sp->height << 16) / (uint32_t)height;
     sxstep = ((uint32_t)sp->width << 16) / (uint32_t)width;
     systep <<= 1;
@@ -395,11 +439,12 @@ static void draw_sprite_scaled(volatile uint8_t *fb, const SHSprite *sp,
     {
         int left = center_x - muldiv(sp->dx, width, sp->width);
         int top = base_y - muldiv(sp->dy, height, sp->height);
+        int y0 = vp->y, y1 = vp->y + vp->h;
         /* Fast path: fully on-screen, non-mirrored sprite. Drops the per-pixel
          * dx/dy/mirror tests and the clamp for x+1/dy+1; the common case for
          * trackside objects and particles. */
-        if (!mirror && left >= 0 && top >= VIEW_Y &&
-            left + width <= 320 && top + height <= VIEW_Y + VIEW_H) {
+        if (!mirror && left >= 0 && top >= y0 &&
+            left + width <= 320 && top + height <= y1) {
             for (y = 0; y < height; y += 2, syfp += systep) {
                 int sy = (int)(syfp >> 16);
                 int dy = top + y;
@@ -421,7 +466,7 @@ static void draw_sprite_scaled(volatile uint8_t *fb, const SHSprite *sp,
             int sy = (int)(syfp >> 16);
             int dy = top + y;
             uint32_t sxfp = 0;
-            if (dy < VIEW_Y || dy >= VIEW_Y + VIEW_H) continue;
+            if (dy < y0 || dy >= y1) continue;
             for (x = 0; x < width; x += 2, sxfp += sxstep) {
                 int sx = (int)(sxfp >> 16);
                 int dx = left + x;
@@ -432,7 +477,7 @@ static void draw_sprite_scaled(volatile uint8_t *fb, const SHSprite *sp,
                 if (c) {
                     fb[dy * 320 + dx] = c;
                     if (dx + 1 < 320) fb[dy * 320 + dx + 1] = c;
-                    if (dy + 1 < VIEW_Y + VIEW_H) {
+                    if (dy + 1 < y1) {
                         fb[(dy + 1) * 320 + dx] = c;
                         if (dx + 1 < 320) fb[(dy + 1) * 320 + dx + 1] = c;
                     }
@@ -581,8 +626,8 @@ static void __attribute__((unused)) draw_car_model(volatile uint8_t *fb, const C
         vy[i] = (((cam->height << 2) - ((int32_t)car->z >> 10) - y) >> 6);
         vz[i] = dz >> 2;
         if (vz[i] < 64) vz[i] = 64;
-        sx[i] = (int16_t)(CX + muldiv(vx[i], cam->focus, vz[i]));
-        sy[i] = (int16_t)(PROJ_Y - cam->horizon + muldiv(vy[i], cam->focus, vz[i]));
+        sx[i] = (int16_t)(cam->vp.cx + muldiv(vx[i], cam->focus, vz[i]));
+        sy[i] = (int16_t)(cam->vp.proj_y - cam->horizon + muldiv(vy[i], cam->focus, vz[i]));
     }
     p = model.data + (uint32_t)model.vertex_count * 12u;
     for (i = 0; i < model.face_count && face_count < 64; ++i) {
@@ -625,8 +670,8 @@ static void __attribute__((unused)) draw_simple_car(volatile uint8_t *fb, const 
     if (depth < (4 << 14) || depth > (24 << 20)) return;
     side = mul30(rely, ca) - mul30(relx, sa);
     if (abs32(side / 2) > depth) return;
-    x = CX + muldiv(side >> 4, cam->focus, depth);
-    y = PROJ_Y + muldiv(cam->height << 2, cam->focus, depth) - cam->horizon;
+    x = cam->vp.cx + muldiv(side >> 4, cam->focus, depth);
+    y = cam->vp.proj_y + muldiv(cam->height << 2, cam->focus, depth) - cam->horizon;
     w = muldiv(9000, cam->focus, depth); if (w < 2) w = 2;
     h = muldiv(4500, cam->focus, depth); if (h < 2) h = 2;
     color = (uint8_t)(161 + (car->model % 6) * 3);
@@ -647,8 +692,8 @@ static void draw_car_sprite(volatile uint8_t *fb, const Camera *cam, const SHCar
     if (depth < (4 << 14) || depth > (24 << 20)) return;
     side = mul30(rely, ca) - mul30(relx, sa);
     if (abs32(side / 2) > depth) return;
-    x = CX + muldiv(side >> 4, cam->focus, depth);
-    y = PROJ_Y + muldiv((cam->height << 2) - ((int32_t)car->z >> 10), cam->focus, depth) - cam->horizon;
+    x = cam->vp.cx + muldiv(side >> 4, cam->focus, depth);
+    y = cam->vp.proj_y + muldiv((cam->height << 2) - ((int32_t)car->z >> 10), cam->focus, depth) - cam->horizon;
     w = muldiv(9000, cam->focus, depth); if (w < 2) w = 2;
     h = w * 3 / 4;
     /* flsprs.c Draw3D uses 0x8000 - camera_angle + object_angle. */
@@ -658,7 +703,7 @@ static void draw_car_sprite(volatile uint8_t *fb, const Camera *cam, const SHCar
                      16u + view) * (64u * 48u);
     sprite.width = 64; sprite.height = 48; sprite.dx = 32; sprite.dy = 48;
     sprite.world_width = sprite.world_height = 0;
-    draw_sprite_scaled(fb, &sprite, x, y, w, h, 0);
+    draw_sprite_scaled(fb, &sprite, x, y, w, h, 0, &cam->vp);
 }
 
 static void draw_race_cars(volatile uint8_t *fb, const Camera *cam, const SHGame *game)
@@ -671,6 +716,7 @@ static void draw_race_cars(volatile uint8_t *fb, const Camera *cam, const SHGame
     draw_car_sprite(fb, cam, &game->ai[1]);
     draw_car_sprite(fb, cam, &game->ai[0]);
     if (!cam->cockpit) draw_car_sprite(fb, cam, &game->player);
+    if (game->split) draw_car_sprite(fb, cam, &game->player2);
 }
 
 typedef struct VisibleSprite { int32_t depth; int x, y, w, h; uint16_t id; } VisibleSprite;
@@ -779,12 +825,12 @@ static uint16_t draw_obstacles(volatile uint8_t *fb, const Camera *cam)
         rely = (int32_t)(ob.y - cam->y) >> 6;
         side = mul30(rely, ca) - mul30(relx, sa);
         sha_get_sprite(ob.sprite, &sp);
-        x = CX + muldiv(side >> 4, cam->focus, depth);
-        y = PROJ_Y + muldiv(cam->height << 2, cam->focus, depth) - cam->horizon;
+        x = cam->vp.cx + muldiv(side >> 4, cam->focus, depth);
+        y = cam->vp.proj_y + muldiv(cam->height << 2, cam->focus, depth) - cam->horizon;
         w = muldiv((int32_t)sp.world_width, cam->focus, depth);
         h = muldiv((int32_t)sp.world_height, cam->focus, depth);
         if (w > 0 && h > 0 && w <= 200 && h <= 200)
-            draw_sprite_scaled(fb, &sp, x, y, w, h, 0);
+            draw_sprite_scaled(fb, &sp, x, y, w, h, 0, &cam->vp);
     }
     return candidates;
 }
@@ -816,8 +862,8 @@ static void draw_effects(volatile uint8_t *fb, const Camera *cam, const SHGame *
         if (depth < (4 << 14) || depth > (20 << 20)) continue;
         side = mul30(rely, ca) - mul30(relx, sa);
         if (abs32(side / 2) > depth) continue;
-        x = CX + muldiv(side >> 4, cam->focus, depth);
-        y = PROJ_Y + muldiv((cam->height << 2) - ((int32_t)effect->z >> 10),
+        x = cam->vp.cx + muldiv(side >> 4, cam->focus, depth);
+        y = cam->vp.proj_y + muldiv((cam->height << 2) - ((int32_t)effect->z >> 10),
                             cam->focus, depth) - cam->horizon;
         if (effect->type == SH_FX_SKID) {
             int size = muldiv(5000, cam->focus, depth);
@@ -836,7 +882,7 @@ static void draw_effects(volatile uint8_t *fb, const Camera *cam, const SHGame *
             w = muldiv((int32_t)sprite.world_width, cam->focus, depth);
             h = muldiv((int32_t)sprite.world_height, cam->focus, depth);
             if (w > 0 && h > 0 && w < 80 && h < 80)
-                draw_sprite_scaled(fb, &sprite, x, y, w, h, 0);
+                draw_sprite_scaled(fb, &sprite, x, y, w, h, 0, &cam->vp);
         }
     }
 }
@@ -871,13 +917,13 @@ static void draw_walls(volatile uint8_t *fb, const Camera *cam)
         if (rz0 > (14 << 20) && rz1 > (14 << 20)) continue;
         if (rz0 < (8 << 12)) { int32_t t = muldiv((8 << 12) - rz0, 65536, rz1 - rz0); rx0 += muldiv(rx1-rx0,t,65536); rz0 = 8 << 12; }
         if (rz1 < (8 << 12)) { int32_t t = muldiv((8 << 12) - rz1, 65536, rz0 - rz1); rx1 += muldiv(rx0-rx1,t,65536); rz1 = 8 << 12; }
-        px0 = CX + muldiv(rx0 >> 4, cam->focus, rz0);
-        px1 = CX + muldiv(rx1 >> 4, cam->focus, rz1);
+        px0 = cam->vp.cx + muldiv(rx0 >> 4, cam->focus, rz0);
+        px1 = cam->vp.cx + muldiv(rx1 >> 4, cam->focus, rz1);
         if (px0 == px1 || (px0 < 0 && px1 < 0) || (px0 >= 320 && px1 >= 320)) continue;
-        bottom0 = PROJ_Y - cam->horizon + muldiv(cam->height << 2, cam->focus, rz0);
-        bottom1 = PROJ_Y - cam->horizon + muldiv(cam->height << 2, cam->focus, rz1);
-        top0 = PROJ_Y - cam->horizon + muldiv((cam->height << 2) - ((int)tex.height << 8), cam->focus, rz0);
-        top1 = PROJ_Y - cam->horizon + muldiv((cam->height << 2) - ((int)tex.height << 8), cam->focus, rz1);
+        bottom0 = cam->vp.proj_y - cam->horizon + muldiv(cam->height << 2, cam->focus, rz0);
+        bottom1 = cam->vp.proj_y - cam->horizon + muldiv(cam->height << 2, cam->focus, rz1);
+        top0 = cam->vp.proj_y - cam->horizon + muldiv((cam->height << 2) - ((int)tex.height << 8), cam->focus, rz0);
+        top1 = cam->vp.proj_y - cam->horizon + muldiv((cam->height << 2) - ((int)tex.height << 8), cam->focus, rz1);
         if (px0 > px1) { int t; t=px0;px0=px1;px1=t; t=bottom0;bottom0=bottom1;bottom1=t; t=top0;top0=top1;top1=t; }
         /* DDA all horizontal interpolation: no division remains in the X loop. */
         {
@@ -911,8 +957,8 @@ static void draw_walls(volatile uint8_t *fb, const Camera *cam)
                 int y;
                 if (span <= 0) continue;
                 tystep = (uint32_t)sh2_idiv((int32_t)tex.height << 16, span);
-                if (top < VIEW_Y) top = VIEW_Y;
-                if (bottom >= VIEW_Y + VIEW_H) bottom = VIEW_Y + VIEW_H - 1;
+                if (top < cam->vp.y) top = cam->vp.y;
+                if (bottom >= cam->vp.y + cam->vp.h) bottom = cam->vp.y + cam->vp.h - 1;
                 tyfp = (uint32_t)(top - unclipped_top) * tystep;
                 tystep <<= 1;
                 for (y = top; y <= bottom; y += 2, tyfp += tystep) {
@@ -966,10 +1012,10 @@ static void draw_minimap(volatile uint8_t *fb, const Camera *cam, const SHCar *p
      * recomputed every 8 frames. */
     for (y = 0; y < 64; ++y) {
         const uint32_t *src = (const uint32_t *)(cache + y * 64);
-        volatile uint32_t *dst = (volatile uint32_t *)(fb + (VIEW_Y + 3 + y) * 320 + 252);
+        volatile uint32_t *dst = (volatile uint32_t *)(fb + (cam->vp.y + 3 + y) * 320 + 252);
         for (x = 0; x < 16; ++x) dst[x] = src[x];
     }
-    rect(fb, 282, VIEW_Y + 33, 5, 5, 14);
+    rect(fb, 282, cam->vp.y + 33, 5, 5, 14);
 }
 
 static void draw_number(volatile uint8_t *fb, unsigned value, uint16_t font0, int x, int y, int digits)
@@ -979,29 +1025,44 @@ static void draw_number(volatile uint8_t *fb, unsigned value, uint16_t font0, in
     for (i=0;i<digits;++i) { unsigned d=(value/divisor)%10; draw_sprite_xy(fb,(uint16_t)(font0+d),x,y); { SHSprite sp; sha_get_sprite((uint16_t)(font0+d),&sp); x+=sp.width+1; } divisor/=10; }
 }
 
-static void draw_hud(volatile uint8_t *fb, const SHGame *game, const Camera *cam)
+static void draw_hud(volatile uint8_t *fb, const Camera *cam)
 {
-    const SHCar *p=&game->player;
+    const SHCar *p = cam->view_car;
+    const int top = cam->vp.y;
+    const int h = cam->vp.h;
     unsigned speed=(unsigned)abs32(muldiv(p->v,p->max_speed,1<<22));
     unsigned lap=p->nlap+1; if(lap>SH_LAPS)lap=SH_LAPS;
     if (cam->cockpit) {
         const uint8_t *cockpit = sha_ptr(p->car_type ? SHA_COCKPIT1_OFF : SHA_COCKPIT0_OFF);
         int bytes = p->car_type ? 17920 : 23360;
-        int h=bytes/320,y,x,base=VIEW_Y+VIEW_H-h;
-        for(y=0;y<h;++y)for(x=0;x<320;++x){uint8_t c=cockpit[y*320+x];if(c)fb[(base+y)*320+x]=c;}
+        int ch=bytes/320,y,x,base=top+h-ch;
+        for(y=0;y<ch;++y)for(x=0;x<320;++x){uint8_t c=cockpit[y*320+x];if(c)fb[(base+y)*320+x]=c;}
     }
-    draw_sprite_xy(fb, SHSPR_MLAPS_IS2, CX-18, VIEW_Y+2);
-    draw_number(fb,lap,SHSPR_MFBG0_IS2,CX-15,VIEW_Y+12,1);
-    draw_sprite_xy(fb,SHSPR_MFBGB_IS2,CX+1,VIEW_Y+22);
-    draw_number(fb,SH_LAPS,SHSPR_MFMG0_IS2,CX+10,VIEW_Y+23,1);
-    draw_sprite_xy(fb,SHSPR_MPOS_IS2,8,VIEW_Y+146);
-    draw_number(fb,p->position,SHSPR_MFBW0_IS2,4,VIEW_Y+169,1);
-    draw_sprite_xy(fb,SHSPR_MPOSBAR_IS2,22,VIEW_Y+182);
-    draw_number(fb,SH_RACERS,SHSPR_MFMW0_IS2,31,VIEW_Y+181,1);
+    if (h < 140) {
+        /* Compact split-screen HUD: lap + speed in the top band only. */
+        draw_sprite_xy(fb, SHSPR_MLAPS_IS2, cam->vp.cx-18, top+2);
+        draw_number(fb,lap,SHSPR_MFBG0_IS2,cam->vp.cx-15,top+12,1);
+        draw_sprite_xy(fb,SHSPR_MFBGB_IS2,cam->vp.cx+1,top+22);
+        draw_number(fb,SH_LAPS,SHSPR_MFMG0_IS2,cam->vp.cx+10,top+23,1);
+        if (!cam->cockpit) {
+            draw_sprite_xy(fb, SHSPR_MPOS_IS2, 8, top+2);
+            draw_number(fb,p->position,SHSPR_MFBW0_IS2,4,top+12,1);
+            draw_number(fb,speed,SHSPR_MFMW0_IS2,12,top+30,3);
+        }
+        return;
+    }
+    draw_sprite_xy(fb, SHSPR_MLAPS_IS2, cam->vp.cx-18, top+2);
+    draw_number(fb,lap,SHSPR_MFBG0_IS2,cam->vp.cx-15,top+12,1);
+    draw_sprite_xy(fb,SHSPR_MFBGB_IS2,cam->vp.cx+1,top+22);
+    draw_number(fb,SH_LAPS,SHSPR_MFMG0_IS2,cam->vp.cx+10,top+23,1);
+    draw_sprite_xy(fb,SHSPR_MPOS_IS2,8,top+146);
+    draw_number(fb,p->position,SHSPR_MFBW0_IS2,4,top+169,1);
+    draw_sprite_xy(fb,SHSPR_MPOSBAR_IS2,22,top+182);
+    draw_number(fb,SH_RACERS,SHSPR_MFMW0_IS2,31,top+181,1);
     if (!cam->cockpit) {
         draw_sprite_xy(fb,p->car_type ? SHSPR_MREVO1_IS2 : SHSPR_MREVO0_IS2,
-                       228,VIEW_Y+126);
-        draw_number(fb,speed,SHSPR_MFMW0_IS2,263,VIEW_Y+180,3);
+                       228,top+126);
+        draw_number(fb,speed,SHSPR_MFMW0_IS2,263,top+180,3);
     }
     draw_minimap(fb,cam,p);
 }
@@ -1012,8 +1073,8 @@ static void render_race(volatile uint8_t *fb, const SHGame *game)
     uint8_t stamp = platform_profile_ticks();
     uint8_t next;
     render_profile.object_candidates = 0;
-    make_camera(game,&cam);
-    build_visible_sectors(game, &cam);
+    make_camera(game, &game->player, game->player.sector, full_viewport(), &cam);
+    build_visible_sectors(&cam);
     next = platform_profile_ticks();
     render_profile.visibility = (uint8_t)(next - stamp); stamp = next;
 #ifdef ENABLE_DUAL_SH2_RENDER
@@ -1053,15 +1114,15 @@ static void render_race(volatile uint8_t *fb, const SHGame *game)
     next = platform_profile_ticks();
     render_profile.cars_effects = (uint8_t)(next - stamp); stamp = next;
 #ifndef SH_NO_HUD
-    if(game->hud)draw_hud(fb,game,&cam);
+    if(game->hud)draw_hud(fb,&cam);
 #endif
     if(game->mode==SH_MODE_COUNTDOWN){
         int sec=game->countdown/70; uint16_t id=SHSPR_RACE_0_IS2;
         if(sec==1)id=SHSPR_RACE_1_IS2;else if(sec==2)id=SHSPR_RACE_2_IS2;else if(sec>=3)id=SHSPR_RACE_3_IS2;
-        draw_sprite_centered(fb,id,CX,SCREEN_CY);
+        draw_sprite_centered(fb,id,cam.vp.cx,cam.vp.cy);
     }
-    if(game->mode==SH_MODE_PAUSED)draw_sprite_centered(fb,SHSPR_PAUSE_IS2,CX,SCREEN_CY-35);
-    if(game->mode==SH_MODE_FINISHED)draw_sprite_centered(fb,game->player.position==1?SHSPR_YOUWIN_IS2:SHSPR_ENDRACE_IS2,CX,SCREEN_CY-35);
+    if(game->mode==SH_MODE_PAUSED)draw_sprite_centered(fb,SHSPR_PAUSE_IS2,cam.vp.cx,cam.vp.cy-35);
+    if(game->mode==SH_MODE_FINISHED)draw_sprite_centered(fb,game->player.position==1?SHSPR_YOUWIN_IS2:SHSPR_ENDRACE_IS2,cam.vp.cx,cam.vp.cy-35);
     next = platform_profile_ticks();
     render_profile.hud = (uint8_t)(next - stamp);
     /* Slave floor overlaps panorama; total is elapsed master critical path. */
@@ -1071,6 +1132,54 @@ static void render_race(volatile uint8_t *fb, const SHGame *game)
                            render_profile.hud;
     render_profile.sector_count = cam.visible_sector_count;
     render_profile.wall_count = cam.visible_wall_count;
+}
+
+/* Render one complete viewport entirely on the master SH-2. Used for split
+ * screen, where the two viewports each need a full background+floor+world
+ * pass and the shared slave cannot cheaply do both. */
+static void render_view_master(volatile uint8_t *fb, const SHGame *game, Camera *cam)
+{
+    build_visible_sectors(cam);
+    draw_background(fb, cam);
+    draw_floor(fb, cam);
+#ifndef SH_NO_WALLS
+    draw_walls(fb, cam);
+#endif
+#ifndef SH_NO_OBSTACLES
+    draw_obstacles(fb, cam);
+#endif
+    draw_effects(fb, cam, game);
+#ifndef SH_NO_MODELS
+    draw_race_cars(fb, cam, game);
+#endif
+    if (game->hud) draw_hud(fb, cam);
+    if (game->mode == SH_MODE_COUNTDOWN) {
+        int sec = game->countdown / 70;
+        uint16_t id = SHSPR_RACE_0_IS2;
+        if (sec == 1) id = SHSPR_RACE_1_IS2;
+        else if (sec == 2) id = SHSPR_RACE_2_IS2;
+        else if (sec >= 3) id = SHSPR_RACE_3_IS2;
+        draw_sprite_centered(fb, id, cam->vp.cx, cam->vp.cy);
+    }
+    if (game->mode == SH_MODE_PAUSED)
+        draw_sprite_centered(fb, SHSPR_PAUSE_IS2, cam->vp.cx, cam->vp.cy - 20);
+    if (game->mode == SH_MODE_FINISHED)
+        draw_sprite_centered(fb, game->player.position == 1 ? SHSPR_YOUWIN_IS2
+                                                            : SHSPR_ENDRACE_IS2,
+                             cam->vp.cx, cam->vp.cy - 20);
+}
+
+/* Two-player split screen: two stacked half-height viewports, both rendered
+ * on the master SH-2. Player 1 on top, player 2 on the bottom. */
+static void render_split(volatile uint8_t *fb, const SHGame *game)
+{
+    Camera cam;
+    make_camera(game, &game->player, game->player.sector,
+                split_viewport(0), &cam);
+    render_view_master(fb, game, &cam);
+    make_camera(game, &game->player2, game->player2.sector,
+                split_viewport(1), &cam);
+    render_view_master(fb, game, &cam);
 }
 
 static void draw_menu_background(volatile uint8_t *fb, uint32_t offset)
@@ -1095,7 +1204,8 @@ static void draw_menu_car_preview(volatile uint8_t *fb, const SHGame *game)
                       (game->selected_car % 6u)) * 16u + view) * (64u * 48u);
     sprite.width = 64; sprite.height = 48; sprite.dx = 32; sprite.dy = 48;
     sprite.world_width = sprite.world_height = 0;
-    draw_sprite_scaled(fb, &sprite, 160, VIEW_Y + 164, 128, 96, 0);
+    { Viewport fv = full_viewport();
+      draw_sprite_scaled(fb, &sprite, 160, VIEW_Y + 164, 128, 96, 0, &fv); }
 }
 
 static void draw_menu(volatile uint8_t *fb, const SHGame *game)
@@ -1109,7 +1219,8 @@ static void draw_menu(volatile uint8_t *fb, const SHGame *game)
     if (game->menu_page == SH_MENU_MAIN) {
         draw_menu_background(fb, SHA_MENU_MAIN_OFF);
         rect(fb,55,VIEW_Y+55,210,77,160); rect(fb,58,VIEW_Y+58,204,71,31);
-        text(fb,106,VIEW_Y+67,"ONE PLAYER",96);
+        text(fb, game->split ? 94 : 106, VIEW_Y + 67,
+             game->split ? "TWO PLAYERS" : "ONE PLAYER", 96);
         {
             const char *track = track_names[game->selected_track & 1u];
             const char *class_name = class_names[game->car_type & 1u];
@@ -1185,9 +1296,14 @@ void sh_render_frame(volatile uint8_t *fb, const SHGame *game)
         if(title_palette!=0){platform_set_vga_palette(sha_ptr(SHA_GAME_PALETTE_OFF));title_palette=0;}
         /* The race renderer overwrites the complete 320x200 viewport. Only
          * clear the overscan bands instead of erasing and redrawing 71K bytes. */
-        rect(fb, 0, 0, 320, VIEW_Y, 0);
-        rect(fb, 0, VIEW_Y + VIEW_H, 320, 224 - VIEW_Y - VIEW_H, 0);
-        render_race(fb,game);
+        if (game->split) {
+            fill(fb, 0);
+            render_split(fb, game);
+        } else {
+            rect(fb, 0, 0, 320, VIEW_Y, 0);
+            rect(fb, 0, VIEW_Y + VIEW_H, 320, 224 - VIEW_Y - VIEW_H, 0);
+            render_race(fb,game);
+        }
     }
     /* Overscan probes expose render phases/counts plus collision, movement,
      * camera, state and heartbeat to the PicoDrive point-to-point test. */

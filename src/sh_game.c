@@ -154,6 +154,13 @@ static void reset_race(SHGame *game)
     game->player.max_speed = car_max_speed[game->player.car_type][game->player.model];
     game->camera_angle = game->player.angle;
 
+    /* Second player (split screen): own start slot and a distinct car. */
+    clear_car(&game->player2);
+    get_start(game->selected_track, 5, &game->player2);
+    game->player2.model = (uint8_t)((game->selected_car + 3) % 6);
+    game->player2.car_type = game->car_type & 1u;
+    game->player2.max_speed = car_max_speed[game->player2.car_type][game->player2.model];
+
     for (i = 0; i < SH_AI_CARS; ++i) {
         clear_car(&game->ai[i]);
         get_start(game->selected_track, i + 1, &game->ai[i]);
@@ -528,9 +535,8 @@ static int collide_with_wall(SHGame *game, SHCar *car, uint32_t old_x, uint32_t 
     return 0;
 }
 
-static void player_tick(SHGame *game, uint16_t pad, int race_started)
+static void player_tick(SHGame *game, SHCar *p, uint16_t pad, int race_started)
 {
-    SHCar *p = &game->player;
     const uint8_t track = game->selected_track;
     int32_t a, maxva, maxa;
     uint32_t old_x, old_y;
@@ -893,13 +899,16 @@ static void rank_cars(SHGame *game)
     unsigned i, j;
     racers[0] = &game->player;
     for (i = 0; i < SH_AI_CARS; ++i) racers[i + 1] = &game->ai[i];
+    racers[SH_AI_CARS + 1] = &game->player2;
     game->player.position = 1;
     for (i = 0; i < SH_AI_CARS; ++i) game->ai[i].position = 1;
+    game->player2.position = 1;
     for (i = 0; i < SH_RACERS; ++i)
         for (j = 0; j < SH_RACERS; ++j)
             if (racer_progress(racers[j]) > racer_progress(racers[i])) {
                 if (i == 0) ++game->player.position;
-                else ++game->ai[i - 1].position;
+                else if (i <= SH_AI_CARS) ++game->ai[i - 1].position;
+                else ++game->player2.position;
             }
 }
 
@@ -917,13 +926,22 @@ static void update_camera(SHGame *game)
     }
 }
 
-static void simulation_tick(SHGame *game, uint16_t pad)
+static void drive_player2(SHGame *game, uint16_t pad2)
+{
+    if (pad2)
+        player_tick(game, &game->player2, pad2, 1);
+    else
+        ai_tick(game, &game->player2);  /* no second pad: computer drives P2 */
+}
+
+static void simulation_tick(SHGame *game, uint16_t pad, uint16_t pad2)
 {
     unsigned i;
     if (game->mode == SH_MODE_COUNTDOWN) {
         if (game->countdown) --game->countdown;
         if (game->countdown < 70) {
-            player_tick(game, pad, 1);
+            player_tick(game, &game->player, pad, 1);
+            if (game->split) drive_player2(game, pad2);
             for (i = 0; i < SH_AI_CARS; ++i)
                 ai_tick(game, &game->ai[i]);
             collide_cars(game);
@@ -939,7 +957,8 @@ static void simulation_tick(SHGame *game, uint16_t pad)
     if (game->qa_route) qa_route_tick(game);
     else
 #endif
-        player_tick(game, pad, 1);
+        player_tick(game, &game->player, pad, 1);
+    if (game->split) drive_player2(game, pad2);
     for (i = 0; i < SH_AI_CARS; ++i)
         ai_tick(game, &game->ai[i]);
 #ifdef ENABLE_QA_HOOKS
@@ -952,7 +971,8 @@ static void simulation_tick(SHGame *game, uint16_t pad)
     if (game->player.finished) game->mode = SH_MODE_FINISHED;
 }
 
-void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks)
+void sh_game_frame(SHGame *game, uint16_t pad, uint16_t pad2,
+                   uint16_t elapsed_vblanks)
 {
     uint16_t pressed = pad & (uint16_t)~game->previous_pad;
     if (elapsed_vblanks == 0) elapsed_vblanks = 1;
@@ -995,6 +1015,8 @@ void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks)
             if (game->menu_page == SH_MENU_MAIN) game->mode = SH_MODE_TITLE;
             else --game->menu_page;
         } else if (game->menu_page == SH_MENU_MAIN) {
+            if (pressed & (SH_PAD_LEFT | SH_PAD_RIGHT))
+                game->split ^= 1u;   /* one / two player */
             if (confirm) game->menu_page = SH_MENU_CIRCUIT;
         } else if (game->menu_page == SH_MENU_CIRCUIT) {
             if (pressed & (SH_PAD_LEFT | SH_PAD_RIGHT | SH_PAD_UP | SH_PAD_DOWN))
@@ -1071,7 +1093,7 @@ void sh_game_frame(SHGame *game, uint16_t pad, uint16_t elapsed_vblanks)
         uint32_t accumulator = game->sim_accumulator + (uint32_t)70 * elapsed_vblanks;
         while (accumulator >= 60) {
             accumulator -= 60;
-            simulation_tick(game, pad);
+            simulation_tick(game, pad, pad2);
         }
         game->sim_accumulator = (uint16_t)accumulator;
     }

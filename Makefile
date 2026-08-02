@@ -105,7 +105,10 @@ test-static: rom
 test-emulator: rom
 	./tools/test_emulator.sh
 
-test: test-unit test-static test-emulator
+test-split: rom
+	./tools/test_split.sh
+
+test: test-unit test-static test-emulator test-split
 
 clean:
 	rm -rf $(BUILD) release/*.elf release/*.32x release/*.map test-results
