@@ -49,6 +49,14 @@ assert "MARS_SYS_COMM10" in (root / "src/platform/platform_32x.c").read_text()
 # The slave floor must always receive a viewport or the single-player floor
 # reads an uninitialized cam.vp and glitches.
 assert "cam.vp = full_viewport();" in render
+# Split-screen player 2 has its own chase/high camera angle so its viewport
+# follows player 2, not player 1's shared camera.
+assert "camera_angle2" in (root / "src/sh_game.h").read_text()
+assert "camera_angle2" in (root / "src/sh_game.c").read_text()
+assert "p == &game->player2 ? game->camera_angle2" in render
+# AI-driven player 2 exposes a movement heading so its chase camera turns.
+assert "car->movangle = car->angle;" in (root / "src/sh_game.c").read_text()
+assert "player2.movangle - game->camera_angle2" in render  # p2 camera-turn probe
 assert "mov.l   r0,@r5" in math_s and "mov.l   r0,@r6" in math_s
 assert "sh2_floor_row(&floor_job)" in render
 assert "CACHE_THROUGH" in assets

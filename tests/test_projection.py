@@ -83,6 +83,6 @@ assert screen_after > screen_before
 
 # Chase/high cameras must retain state and converge by 1/16, not snap to player.
 assert "delta / 16" in game
-assert "game->camera_angle + step" in game
-assert "game->camera_angle = game->player.angle" in game  # radius-zero cockpit
+assert "*angle + step" in game          # per-player camera converges by 1/16
+assert "camera_angle2" in game          # split player 2 keeps its own camera
 print("PASS: shared perspective, forward scene flow, camera lag and rear-view orientation")

@@ -81,6 +81,7 @@ typedef struct SHGame {
     uint8_t menu_release, qa_route;
     uint16_t previous_pad;
     uint16_t camera_angle;
+    uint16_t camera_angle2;   /* split-screen player 2 chase/high camera angle */
     uint16_t countdown;
     uint16_t sim_accumulator;
     uint16_t collision_count;
